@@ -9,6 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
+APP_VERSION = "V5.5 - guardado por bloques"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -119,7 +120,95 @@ def to_number(value) -> float:
 
 
 def read_excel_any(path_or_file) -> pd.DataFrame:
+    if hasattr(path_or_file, "seek"):
+        path_or_file.seek(0)
     return pd.read_excel(path_or_file, dtype=str)
+
+
+def make_unique_columns(cols: List[str]) -> List[str]:
+    seen = {}
+    result = []
+
+    for col in cols:
+        name = str(col).strip()
+        if not name or name.lower() == "nan":
+            name = "Unnamed"
+
+        if name not in seen:
+            seen[name] = 0
+            result.append(name)
+        else:
+            seen[name] += 1
+            result.append(f"{name}_{seen[name]}")
+
+    return result
+
+
+def row_has_candidate(row_values: List[str], candidates: List[str]) -> bool:
+    normalized_candidates = [norm_col(c) for c in candidates]
+
+    for cell in row_values:
+        cell_norm = norm_col(cell)
+
+        for cand in normalized_candidates:
+            if not cand:
+                continue
+
+            if cell_norm == cand:
+                return True
+
+            if cand in cell_norm:
+                return True
+
+    return False
+
+
+def read_excel_detect_header(path_or_file, required_groups: List[List[str]], max_scan_rows: int = 80) -> pd.DataFrame:
+    """
+    Lee un Excel donde los encabezados no necesariamente están en la primera fila.
+
+    Caso esperado:
+    Fila 1: LIBRO MAYOR AUXILIAR DE INVENTARIO
+    Fila real de encabezados: Artículo | SKU | Familia | Q. Saldo Consolidado | $ Saldo | Costo promedio
+    """
+    if hasattr(path_or_file, "seek"):
+        path_or_file.seek(0)
+
+    raw = pd.read_excel(path_or_file, dtype=str, header=None)
+
+    header_row_idx = None
+    rows_to_scan = min(max_scan_rows, len(raw))
+
+    for i in range(rows_to_scan):
+        row_values = ["" if pd.isna(v) else str(v) for v in raw.iloc[i].tolist()]
+        matches_all_required_groups = True
+
+        for group in required_groups:
+            if not row_has_candidate(row_values, group):
+                matches_all_required_groups = False
+                break
+
+        if matches_all_required_groups:
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        preview = []
+        for i in range(min(10, len(raw))):
+            preview.append([str(v) for v in raw.iloc[i].fillna("").tolist()])
+
+        raise ValueError(
+            "No pude detectar la fila de encabezados del LibroInventario. "
+            "Busqué una fila que contenga SKU y una columna de stock/saldo. "
+            f"Primeras filas detectadas: {preview}"
+        )
+
+    headers = make_unique_columns(raw.iloc[header_row_idx].fillna("").astype(str).tolist())
+    df = raw.iloc[header_row_idx + 1:].copy()
+    df.columns = headers
+    df = df.dropna(how="all").reset_index(drop=True)
+
+    return df
 
 
 def find_column(df: pd.DataFrame, candidates: List[str], required: bool = True) -> Optional[str]:
@@ -247,10 +336,37 @@ def api_upsert_product(payload: dict) -> None:
     api_call("upsert_product", payload, timeout=60)
 
 
-def api_bulk_upsert_products(items: List[dict]) -> None:
+def chunk_list(items: List[dict], chunk_size: int) -> List[List[dict]]:
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250) -> None:
+    """
+    Guarda alertas/estados automáticos por bloques para evitar timeout.
+    Con Apps Script V5.5 el guardado interno también es por lote.
+    """
     if not items:
         return
-    api_call("bulk_upsert_products", {"items": items}, timeout=120)
+
+    chunks = chunk_list(items, chunk_size)
+    total = len(items)
+
+    progress = st.sidebar.progress(0, text=f"Guardando alertas automáticas 0/{total}")
+
+    saved = 0
+    for chunk in chunks:
+        api_call(
+            "bulk_upsert_products",
+            {"items": chunk},
+            timeout=150
+        )
+        saved += len(chunk)
+        progress.progress(
+            min(saved / total, 1.0),
+            text=f"Guardando alertas automáticas {saved}/{total}"
+        )
+
+    progress.empty()
 
 
 # ============================================================
@@ -338,7 +454,56 @@ def load_packs() -> pd.DataFrame:
 
 
 def load_inventory_from_upload(uploaded_file) -> pd.DataFrame:
-    df = read_excel_any(uploaded_file)
+    """
+    Lector robusto para LibroInventario.
+    Fuerza lectura con header=None y detecta la fila real de encabezados.
+    Esto evita que Streamlit/Pandas tome como encabezado:
+    'LIBRO MAYOR AUXILIAR DE INVENTARIO'.
+    """
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+        file_bytes = uploaded_file.read()
+        source = BytesIO(file_bytes)
+    else:
+        source = uploaded_file
+
+    raw = pd.read_excel(source, dtype=str, header=None)
+
+    header_row_idx = None
+    rows_to_scan = min(100, len(raw))
+
+    for i in range(rows_to_scan):
+        row_values = ["" if pd.isna(v) else str(v) for v in raw.iloc[i].tolist()]
+
+        has_sku = row_has_candidate(row_values, ["SKU"])
+        has_stock = row_has_candidate(
+            row_values,
+            ["Q. Saldo Consolidado", "Saldo Consolidado", "Stock", "Cantidad", "Existencia"]
+        )
+
+        if has_sku and has_stock:
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        preview = []
+        for i in range(min(12, len(raw))):
+            preview.append([str(v) for v in raw.iloc[i].fillna("").tolist()])
+
+        raise ValueError(
+            "V5.4: No pude detectar la fila real de encabezados del LibroInventario. "
+            "Busqué una fila que contenga SKU y Q. Saldo Consolidado/Stock. "
+            f"Primeras filas detectadas: {preview}"
+        )
+
+    headers = make_unique_columns(raw.iloc[header_row_idx].fillna("").astype(str).tolist())
+    df = raw.iloc[header_row_idx + 1:].copy()
+    df.columns = headers
+    df = df.dropna(how="all").reset_index(drop=True)
+
+    # Guardar diagnóstico para mostrarlo en pantalla después de procesar.
+    st.session_state["ultimo_inventario_header_excel"] = header_row_idx + 1
+    st.session_state["ultimo_inventario_columnas"] = headers
 
     sku_col = find_column(df, ["SKU"])
     stock_col = find_column(df, ["Q. Saldo Consolidado", "Saldo Consolidado", "Stock", "Cantidad", "Existencia"])
@@ -364,8 +529,9 @@ def load_inventory_from_upload(uploaded_file) -> pd.DataFrame:
         "SaldoValor": "sum",
     })
 
-    return out
+    st.session_state["ultimo_inventario_filas"] = len(out)
 
+    return out
 
 def normalize_inventory_from_api(inv_api_df: pd.DataFrame) -> pd.DataFrame:
     if inv_api_df.empty:
@@ -722,6 +888,7 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
             productos_nuevos = int((queue_tmp["Origen"] == "PRODUCTO NUEVO").sum()) if not queue_tmp.empty else 0
             llegaron_stock = int((queue_tmp["Estado"] == "LLEGÓ STOCK").sum()) if not queue_tmp.empty else 0
 
+            st.sidebar.info("Guardando inventario central en Google Sheets...")
             api_replace_inventory(
                 inv_df=inv_new_df,
                 usuario=usuario.strip(),
@@ -730,12 +897,22 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
             )
 
             auto_alerts = build_auto_alerts(queue_tmp, estado_df)
+            if auto_alerts:
+                st.sidebar.info(f"Guardando {len(auto_alerts):,} alertas automáticas por bloques...")
             api_bulk_upsert_products(auto_alerts)
 
             st.sidebar.success(
                 f"Inventario guardado: {len(inv_new_df):,} SKUs | "
                 f"Nuevos: {productos_nuevos:,} | Llegó stock: {llegaron_stock:,}"
             )
+
+            if "ultimo_inventario_header_excel" in st.session_state:
+                st.sidebar.info(
+                    f"Encabezados detectados en fila Excel: {st.session_state['ultimo_inventario_header_excel']}"
+                )
+                st.sidebar.caption(
+                    "Columnas detectadas: " + ", ".join(st.session_state.get("ultimo_inventario_columnas", []))
+                )
 
             st.cache_data.clear()
             st.rerun()
@@ -903,6 +1080,7 @@ def status_ui(estado_df: pd.DataFrame, inv_df: pd.DataFrame):
 
 def main():
     page_config()
+    st.sidebar.caption(f"Versión: {APP_VERSION}")
     validate_base_files()
 
     try:
