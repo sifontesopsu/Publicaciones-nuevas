@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V5.7 - faltante físico y reporte bodega"
+APP_VERSION = "V5.8 - pickeo operativo"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -27,6 +27,7 @@ ESTADOS = [
     "SIN STOCK",
     "LLEGÓ STOCK",
     "PENDIENTE PUBLICAR",
+    "PICKEADO PARA PUBLICAR",
     "EN PROCESO DE PUBLICACIÓN",
     "PUBLICADO",
     "FALTANTE FÍSICO CON STOCK KAME",
@@ -48,6 +49,7 @@ LEGACY_ESTADOS_MAP = {
 
 ESTADOS_MANUALES_PROTEGIDOS = {
     "PENDIENTE PUBLICAR",
+    "PICKEADO PARA PUBLICAR",
     "EN PROCESO DE PUBLICACIÓN",
     "PUBLICADO",
     "FALTANTE FÍSICO CON STOCK KAME",
@@ -84,6 +86,7 @@ MOTIVOS_NO_PUBLICABLE = [
 MOTIVOS_GENERALES = [
     "",
     "Inicio de publicación",
+    "Pickeado para publicar",
     "Publicado correctamente",
     "Faltante físico con stock en Kame",
     "Corrección de estado",
@@ -880,7 +883,7 @@ def dashboard(queue_df: pd.DataFrame):
     c2.metric("Llegó stock", int((queue_df["Estado"] == "LLEGÓ STOCK").sum()) if total else 0)
     c3.metric("Pendiente publicar", int((queue_df["Estado"] == "PENDIENTE PUBLICAR").sum()) if total else 0)
     c4.metric("Productos nuevos c/stock", int((queue_df["Estado"] == "PRODUCTO NUEVO CON STOCK").sum()) if total else 0)
-    c5.metric("En proceso", int((queue_df["Estado"] == "EN PROCESO DE PUBLICACIÓN").sum()) if total else 0)
+    c5.metric("Pickeados", int((queue_df["Estado"].isin(["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"])).sum()) if total else 0)
 
     c6, c7, c8, c9, c10 = st.columns(5)
     c6.metric("Faltante físico", int((queue_df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME").sum()) if total else 0)
@@ -960,15 +963,16 @@ def priority_sort(df: pd.DataFrame) -> pd.DataFrame:
         "LLEGÓ STOCK": 1,
         "PRODUCTO NUEVO CON STOCK": 2,
         "PENDIENTE PUBLICAR": 3,
-        "EN PROCESO DE PUBLICACIÓN": 4,
-        "FALTANTE FÍSICO CON STOCK KAME": 5,
-        "CUBIERTO POR PACK": 6,
-        "CUBIERTO POR UNIDAD": 7,
-        "SIN STOCK": 8,
-        "PRODUCTO NUEVO SIN STOCK": 9,
-        "NO PUBLICABLE": 10,
-        "PUBLICADO": 11,
-        "PRODUCTO NUEVO PUBLICADO": 12,
+        "PICKEADO PARA PUBLICAR": 4,
+        "EN PROCESO DE PUBLICACIÓN": 5,
+        "FALTANTE FÍSICO CON STOCK KAME": 6,
+        "CUBIERTO POR PACK": 7,
+        "CUBIERTO POR UNIDAD": 8,
+        "SIN STOCK": 9,
+        "PRODUCTO NUEVO SIN STOCK": 10,
+        "NO PUBLICABLE": 11,
+        "PUBLICADO": 12,
+        "PRODUCTO NUEVO PUBLICADO": 13,
     }
 
     out = df.copy()
@@ -999,7 +1003,7 @@ def save_status_change(row: pd.Series, nuevo_estado: str, responsable: str, moti
 
 def operar_productos_ui(queue_df: pd.DataFrame):
     st.subheader("Operar productos")
-    st.caption("Flujo rápido para Marketing: iniciar publicación, marcar publicado o clasificar como no publicable.")
+    st.caption("Flujo rápido para Marketing: pickear/revisar, enviar a publicación, reportar faltante físico o clasificar como no publicable.")
 
     if queue_df.empty:
         st.info("No hay productos para operar.")
@@ -1013,7 +1017,7 @@ def operar_productos_ui(queue_df: pd.DataFrame):
         "Cola de trabajo",
         [
             "Pendientes por pickear/revisar",
-            "En proceso de publicación",
+            "Pickeados para publicar",
             "Faltante físico con stock Kame",
             "No publicables",
             "Cubiertos por pack/unidad",
@@ -1031,8 +1035,8 @@ def operar_productos_ui(queue_df: pd.DataFrame):
 
     if modo == "Pendientes por pickear/revisar":
         df = df[df["Estado"].isin(["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"])]
-    elif modo == "En proceso de publicación":
-        df = df[df["Estado"] == "EN PROCESO DE PUBLICACIÓN"]
+    elif modo == "Pickeados para publicar":
+        df = df[df["Estado"].isin(["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"])]
     elif modo == "Faltante físico con stock Kame":
         df = df[df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME"]
     elif modo == "No publicables":
@@ -1101,41 +1105,30 @@ def operar_productos_ui(queue_df: pd.DataFrame):
                 st.warning(f"{row.get('RelacionPackUnidad', '')}: {row.get('SKURelacionadoPublicado', '')}")
 
             obs_key = f"obs_{sku}_{idx}"
-            link_key = f"link_{sku}_{idx}"
-            motivo_key = f"motivo_np_{sku}_{idx}"
+            motivo_key = f"motivo_np_libre_{sku}_{idx}"
 
             observacion = st.text_input("Observación rápida", key=obs_key, placeholder="Opcional")
-            link_publicacion = st.text_input("Link publicación ML", key=link_key, value=str(row.get("LinkPublicacion", "") or ""), placeholder="Pegar link cuando ya esté publicada")
-            motivo_np = st.selectbox("Motivo si no es publicable", MOTIVOS_NO_PUBLICABLE, key=motivo_key)
+            motivo_np = st.text_area(
+                "Motivo no publicable",
+                key=motivo_key,
+                placeholder="Escribe el motivo solo si marcarás el producto como no publicable.",
+                height=80,
+            )
 
-            b1, b2, b3, b4, b5 = st.columns(5)
+            b1, b2, b3 = st.columns(3)
 
-            if b1.button("Iniciar publicación", key=f"iniciar_{sku}_{idx}", use_container_width=True):
+            if b1.button("Pickeado para publicar", key=f"pickeado_{sku}_{idx}", use_container_width=True):
                 if not responsable.strip():
                     st.error("Indica responsable antes de guardar.")
                 else:
                     try:
-                        save_status_change(row, "EN PROCESO DE PUBLICACIÓN", responsable, "Inicio de publicación", observacion, link_publicacion)
-                        st.success(f"{sku} pasó a EN PROCESO DE PUBLICACIÓN")
+                        save_status_change(row, "PICKEADO PARA PUBLICAR", responsable, "Pickeado para publicar", observacion, "")
+                        st.success(f"{sku} pasó a PICKEADO PARA PUBLICAR")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo guardar: {e}")
 
-            if b2.button("Marcar publicado", key=f"publicado_{sku}_{idx}", use_container_width=True):
-                if not responsable.strip():
-                    st.error("Indica responsable antes de guardar.")
-                elif not link_publicacion.strip():
-                    st.error("Pega el link de publicación antes de marcar como publicado.")
-                else:
-                    try:
-                        estado_publicado = "PRODUCTO NUEVO PUBLICADO" if origen == "PRODUCTO NUEVO" else "PUBLICADO"
-                        save_status_change(row, estado_publicado, responsable, "Publicado correctamente", observacion, link_publicacion)
-                        st.success(f"{sku} marcado como {estado_publicado}")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"No se pudo guardar: {e}")
-
-            if b3.button("Faltante físico", key=f"faltante_fisico_{sku}_{idx}", use_container_width=True):
+            if b2.button("Faltante físico", key=f"faltante_fisico_{sku}_{idx}", use_container_width=True):
                 if not responsable.strip():
                     st.error("Indica responsable antes de guardar.")
                 else:
@@ -1146,33 +1139,22 @@ def operar_productos_ui(queue_df: pd.DataFrame):
                             responsable,
                             "Faltante físico con stock en Kame",
                             observacion,
-                            link_publicacion
+                            ""
                         )
                         st.warning(f"{sku} enviado a cola: FALTANTE FÍSICO CON STOCK KAME")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo guardar: {e}")
 
-            if b4.button("No publicable", key=f"nopub_{sku}_{idx}", use_container_width=True):
+            if b3.button("No publicable", key=f"nopub_{sku}_{idx}", use_container_width=True):
                 if not responsable.strip():
                     st.error("Indica responsable antes de guardar.")
-                elif not motivo_np:
-                    st.error("Selecciona un motivo de no publicable.")
+                elif not motivo_np.strip():
+                    st.error("Escribe el motivo antes de marcar como no publicable.")
                 else:
                     try:
-                        save_status_change(row, "NO PUBLICABLE", responsable, motivo_np, observacion, link_publicacion)
+                        save_status_change(row, "NO PUBLICABLE", responsable, motivo_np.strip(), observacion, "")
                         st.success(f"{sku} marcado como NO PUBLICABLE")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"No se pudo guardar: {e}")
-
-            if b5.button("Pendiente revisar", key=f"pendiente_{sku}_{idx}", use_container_width=True):
-                if not responsable.strip():
-                    st.error("Indica responsable antes de guardar.")
-                else:
-                    try:
-                        save_status_change(row, "PENDIENTE PUBLICAR", responsable, "Corrección de estado", observacion, link_publicacion)
-                        st.success(f"{sku} volvió a PENDIENTE PUBLICAR")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo guardar: {e}")
@@ -1371,6 +1353,7 @@ def main():
                 "LLEGÓ STOCK",
                 "PRODUCTO NUEVO CON STOCK",
                 "PENDIENTE PUBLICAR",
+                "PICKEADO PARA PUBLICAR",
                 "EN PROCESO DE PUBLICACIÓN",
             ])].copy()
             preview = priority_sort(preview)
