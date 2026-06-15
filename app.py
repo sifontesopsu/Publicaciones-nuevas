@@ -17,6 +17,11 @@ MAESTRO_FILE = DATA_DIR / "maestro_sku_ean.xlsx"
 PUBLICACIONES_FILE = DATA_DIR / "publicaciones_mercado_libre.xlsx"
 PACKS_FILE = DATA_DIR / "packs.xlsx"
 
+# URL de Apps Script ya configurada.
+# En Streamlit Cloud puedes sobrescribirla desde Secrets si cambia el despliegue.
+DEFAULT_APP_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw8k8UkeHtHdAcAFUKvBtHfELH7byRdM0hXao5-OjqeCbI1KL3JxaQfFebgq7_4fzoy/exec"
+DEFAULT_APP_SCRIPT_TOKEN = "aurora_publicaciones_2026"
+
 ESTADOS = [
     "SIN STOCK",
     "LLEGÓ STOCK",
@@ -155,8 +160,17 @@ def export_excel(df: pd.DataFrame) -> bytes:
 # ============================================================
 
 def get_api_config() -> Tuple[str, str]:
-    url = st.secrets.get("APP_SCRIPT_URL", "")
-    token = st.secrets.get("APP_SCRIPT_TOKEN", "")
+    """
+    Primero intenta leer Streamlit Secrets.
+    Si no existen, usa la URL y token configurados por defecto.
+    """
+    try:
+        url = st.secrets.get("APP_SCRIPT_URL", DEFAULT_APP_SCRIPT_URL)
+        token = st.secrets.get("APP_SCRIPT_TOKEN", DEFAULT_APP_SCRIPT_TOKEN)
+    except Exception:
+        url = DEFAULT_APP_SCRIPT_URL
+        token = DEFAULT_APP_SCRIPT_TOKEN
+
     return url, token
 
 
