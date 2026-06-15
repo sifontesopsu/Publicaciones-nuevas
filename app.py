@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V5.6 - módulo operativo simplificado"
+APP_VERSION = "V5.7 - faltante físico y reporte bodega"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -29,6 +29,7 @@ ESTADOS = [
     "PENDIENTE PUBLICAR",
     "EN PROCESO DE PUBLICACIÓN",
     "PUBLICADO",
+    "FALTANTE FÍSICO CON STOCK KAME",
     "NO PUBLICABLE",
     "CUBIERTO POR PACK",
     "CUBIERTO POR UNIDAD",
@@ -49,6 +50,7 @@ ESTADOS_MANUALES_PROTEGIDOS = {
     "PENDIENTE PUBLICAR",
     "EN PROCESO DE PUBLICACIÓN",
     "PUBLICADO",
+    "FALTANTE FÍSICO CON STOCK KAME",
     "NO PUBLICABLE",
     "PRODUCTO NUEVO PUBLICADO",
 }
@@ -83,6 +85,7 @@ MOTIVOS_GENERALES = [
     "",
     "Inicio de publicación",
     "Publicado correctamente",
+    "Faltante físico con stock en Kame",
     "Corrección de estado",
     "Alerta automática",
     "Producto nuevo detectado en inventario",
@@ -880,11 +883,11 @@ def dashboard(queue_df: pd.DataFrame):
     c5.metric("En proceso", int((queue_df["Estado"] == "EN PROCESO DE PUBLICACIÓN").sum()) if total else 0)
 
     c6, c7, c8, c9, c10 = st.columns(5)
-    c6.metric("No publicables", int((queue_df["Estado"] == "NO PUBLICABLE").sum()) if total else 0)
-    c7.metric("Publicados", int((queue_df["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"])).sum()) if total else 0)
-    c8.metric("Sin stock", int((queue_df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])).sum()) if total else 0)
-    c9.metric("Cubierto pack", int((queue_df["Estado"] == "CUBIERTO POR PACK").sum()) if total else 0)
-    c10.metric("Cubierto unidad", int((queue_df["Estado"] == "CUBIERTO POR UNIDAD").sum()) if total else 0)
+    c6.metric("Faltante físico", int((queue_df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME").sum()) if total else 0)
+    c7.metric("No publicables", int((queue_df["Estado"] == "NO PUBLICABLE").sum()) if total else 0)
+    c8.metric("Publicados", int((queue_df["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"])).sum()) if total else 0)
+    c9.metric("Sin stock Kame", int((queue_df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])).sum()) if total else 0)
+    c10.metric("Cubierto pack/unidad", int((queue_df["Estado"].isin(["CUBIERTO POR PACK", "CUBIERTO POR UNIDAD"])).sum()) if total else 0)
 
 def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df):
     st.sidebar.header("Actualizar inventario")
@@ -958,13 +961,14 @@ def priority_sort(df: pd.DataFrame) -> pd.DataFrame:
         "PRODUCTO NUEVO CON STOCK": 2,
         "PENDIENTE PUBLICAR": 3,
         "EN PROCESO DE PUBLICACIÓN": 4,
-        "CUBIERTO POR PACK": 5,
-        "CUBIERTO POR UNIDAD": 6,
-        "SIN STOCK": 7,
-        "PRODUCTO NUEVO SIN STOCK": 8,
-        "NO PUBLICABLE": 9,
-        "PUBLICADO": 10,
-        "PRODUCTO NUEVO PUBLICADO": 11,
+        "FALTANTE FÍSICO CON STOCK KAME": 5,
+        "CUBIERTO POR PACK": 6,
+        "CUBIERTO POR UNIDAD": 7,
+        "SIN STOCK": 8,
+        "PRODUCTO NUEVO SIN STOCK": 9,
+        "NO PUBLICABLE": 10,
+        "PUBLICADO": 11,
+        "PRODUCTO NUEVO PUBLICADO": 12,
     }
 
     out = df.copy()
@@ -1008,11 +1012,12 @@ def operar_productos_ui(queue_df: pd.DataFrame):
     modo = col_a.selectbox(
         "Cola de trabajo",
         [
-            "Pendientes por publicar",
+            "Pendientes por pickear/revisar",
             "En proceso de publicación",
+            "Faltante físico con stock Kame",
             "No publicables",
             "Cubiertos por pack/unidad",
-            "Sin stock",
+            "Sin stock Kame",
             "Todos",
         ],
         key="operar_modo",
@@ -1024,15 +1029,17 @@ def operar_productos_ui(queue_df: pd.DataFrame):
 
     df = queue_df.copy()
 
-    if modo == "Pendientes por publicar":
+    if modo == "Pendientes por pickear/revisar":
         df = df[df["Estado"].isin(["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"])]
     elif modo == "En proceso de publicación":
         df = df[df["Estado"] == "EN PROCESO DE PUBLICACIÓN"]
+    elif modo == "Faltante físico con stock Kame":
+        df = df[df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME"]
     elif modo == "No publicables":
         df = df[df["Estado"] == "NO PUBLICABLE"]
     elif modo == "Cubiertos por pack/unidad":
         df = df[df["Estado"].isin(["CUBIERTO POR PACK", "CUBIERTO POR UNIDAD"])]
-    elif modo == "Sin stock":
+    elif modo == "Sin stock Kame":
         df = df[df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])]
 
     if familia != "TODAS":
@@ -1048,6 +1055,21 @@ def operar_productos_ui(queue_df: pd.DataFrame):
     df = priority_sort(df)
 
     st.write(f"Productos en esta vista: **{len(df):,}**")
+
+    if modo == "Faltante físico con stock Kame":
+        reporte_cols = [
+            "SKU", "Descripcion", "Familia", "EAN", "StockSistema", "Estado",
+            "Motivo", "Observacion", "Responsable", "FechaUltimaGestion"
+        ]
+        reporte_cols = [c for c in reporte_cols if c in df.columns]
+        if not df.empty:
+            st.download_button(
+                "Descargar informe para bodega",
+                data=to_excel_bytes(df[reporte_cols]),
+                file_name=f"informe_faltante_fisico_stock_kame_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
     if df.empty:
         st.info("No hay productos en esta cola con los filtros actuales.")
@@ -1086,7 +1108,7 @@ def operar_productos_ui(queue_df: pd.DataFrame):
             link_publicacion = st.text_input("Link publicación ML", key=link_key, value=str(row.get("LinkPublicacion", "") or ""), placeholder="Pegar link cuando ya esté publicada")
             motivo_np = st.selectbox("Motivo si no es publicable", MOTIVOS_NO_PUBLICABLE, key=motivo_key)
 
-            b1, b2, b3, b4 = st.columns(4)
+            b1, b2, b3, b4, b5 = st.columns(5)
 
             if b1.button("Iniciar publicación", key=f"iniciar_{sku}_{idx}", use_container_width=True):
                 if not responsable.strip():
@@ -1113,7 +1135,25 @@ def operar_productos_ui(queue_df: pd.DataFrame):
                     except Exception as e:
                         st.error(f"No se pudo guardar: {e}")
 
-            if b3.button("No publicable", key=f"nopub_{sku}_{idx}", use_container_width=True):
+            if b3.button("Faltante físico", key=f"faltante_fisico_{sku}_{idx}", use_container_width=True):
+                if not responsable.strip():
+                    st.error("Indica responsable antes de guardar.")
+                else:
+                    try:
+                        save_status_change(
+                            row,
+                            "FALTANTE FÍSICO CON STOCK KAME",
+                            responsable,
+                            "Faltante físico con stock en Kame",
+                            observacion,
+                            link_publicacion
+                        )
+                        st.warning(f"{sku} enviado a cola: FALTANTE FÍSICO CON STOCK KAME")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo guardar: {e}")
+
+            if b4.button("No publicable", key=f"nopub_{sku}_{idx}", use_container_width=True):
                 if not responsable.strip():
                     st.error("Indica responsable antes de guardar.")
                 elif not motivo_np:
@@ -1126,13 +1166,13 @@ def operar_productos_ui(queue_df: pd.DataFrame):
                     except Exception as e:
                         st.error(f"No se pudo guardar: {e}")
 
-            if b4.button("Pendiente publicar", key=f"pendiente_{sku}_{idx}", use_container_width=True):
+            if b5.button("Pendiente revisar", key=f"pendiente_{sku}_{idx}", use_container_width=True):
                 if not responsable.strip():
                     st.error("Indica responsable antes de guardar.")
                 else:
                     try:
                         save_status_change(row, "PENDIENTE PUBLICAR", responsable, "Corrección de estado", observacion, link_publicacion)
-                        st.success(f"{sku} quedó como PENDIENTE PUBLICAR")
+                        st.success(f"{sku} volvió a PENDIENTE PUBLICAR")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo guardar: {e}")
@@ -1324,7 +1364,7 @@ def main():
     with tabs[1]:
         dashboard(queue_df)
         st.divider()
-        st.subheader("Prioridad de trabajo")
+        st.subheader("Pendientes por pickear/revisar")
 
         if not queue_df.empty:
             preview = queue_df[queue_df["Estado"].isin([
