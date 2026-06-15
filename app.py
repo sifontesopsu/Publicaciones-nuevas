@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V5.5 - guardado por bloques"
+APP_VERSION = "V5.6 - módulo operativo simplificado"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -26,14 +26,10 @@ DEFAULT_APP_SCRIPT_TOKEN = "aurora_publicaciones_2026"
 ESTADOS = [
     "SIN STOCK",
     "LLEGÓ STOCK",
-    "PENDIENTE VERIFICAR FÍSICO",
-    "STOCK FÍSICO CONFIRMADO",
+    "PENDIENTE PUBLICAR",
     "EN PROCESO DE PUBLICACIÓN",
     "PUBLICADO",
-    "NO ENCONTRADO FÍSICO",
     "NO PUBLICABLE",
-    "FALTA FOTO",
-    "FALTA INFORMACIÓN",
     "CUBIERTO POR PACK",
     "CUBIERTO POR UNIDAD",
     "PRODUCTO NUEVO CON STOCK",
@@ -41,34 +37,64 @@ ESTADOS = [
     "PRODUCTO NUEVO PUBLICADO",
 ]
 
+LEGACY_ESTADOS_MAP = {
+    "PENDIENTE VERIFICAR FÍSICO": "PENDIENTE PUBLICAR",
+    "STOCK FÍSICO CONFIRMADO": "PENDIENTE PUBLICAR",
+    "NO ENCONTRADO FÍSICO": "NO PUBLICABLE",
+    "FALTA FOTO": "NO PUBLICABLE",
+    "FALTA INFORMACIÓN": "NO PUBLICABLE",
+}
+
 ESTADOS_MANUALES_PROTEGIDOS = {
-    "STOCK FÍSICO CONFIRMADO",
+    "PENDIENTE PUBLICAR",
     "EN PROCESO DE PUBLICACIÓN",
     "PUBLICADO",
-    "NO ENCONTRADO FÍSICO",
     "NO PUBLICABLE",
-    "FALTA FOTO",
-    "FALTA INFORMACIÓN",
     "PRODUCTO NUEVO PUBLICADO",
 }
 
-MOTIVOS = [
+MOTIVOS_NO_PUBLICABLE = [
     "",
-    "No encontrado físicamente",
-    "Producto dañado",
+    "SKU duplicado / ya publicado",
+    "Producto ya cubierto por pack",
+    "Producto ya cubierto por unidad",
+    "No corresponde publicar individual",
+    "Producto descontinuado",
+    "Producto de baja rotación",
+    "Margen insuficiente / no rentable",
+    "Precio no competitivo",
+    "Producto solo para venta presencial",
+    "Producto a pedido / stock no estable",
+    "Producto frágil o riesgoso para despacho",
+    "Producto con peso o medidas problemáticas",
     "Producto incompleto",
-    "No apto para Mercado Libre",
-    "Sin foto",
-    "Sin información técnica",
-    "SKU duplicado",
-    "EAN incorrecto",
-    "Pack mal definido",
-    "Solo venta presencial",
-    "No rentable",
-    "Descontinuado",
+    "Producto dañado",
+    "Producto no identificado",
+    "EAN incorrecto o inválido",
+    "Datos del maestro incorrectos",
+    "Categoría Mercado Libre no conveniente",
+    "Producto restringido por Mercado Libre",
+    "Marca/modelo no autorizado",
+    "Relación pack/unidad incorrecta",
+    "Otro",
+]
+
+MOTIVOS_GENERALES = [
+    "",
+    "Inicio de publicación",
+    "Publicado correctamente",
+    "Corrección de estado",
+    "Alerta automática",
     "Producto nuevo detectado en inventario",
     "Otro",
 ]
+
+MOTIVOS = MOTIVOS_GENERALES + [m for m in MOTIVOS_NO_PUBLICABLE if m and m not in MOTIVOS_GENERALES]
+
+
+def normalize_estado_operativo(estado: str) -> str:
+    estado = str(estado or "").strip()
+    return LEGACY_ESTADOS_MAP.get(estado, estado)
 
 
 # ============================================================
@@ -723,7 +749,7 @@ def build_work_queue(
         elif stock_actual > 0 and stock_anterior <= 0:
             estado_sugerido = "LLEGÓ STOCK"
         elif stock_actual > 0:
-            estado_sugerido = "PENDIENTE VERIFICAR FÍSICO"
+            estado_sugerido = "PENDIENTE PUBLICAR"
         else:
             estado_sugerido = "SIN STOCK"
 
@@ -734,7 +760,7 @@ def build_work_queue(
         link_publicacion = manual_published.get(sku, "")
 
         if existing_state:
-            old_estado = str(existing_state.get("estado", "") or "")
+            old_estado = normalize_estado_operativo(str(existing_state.get("estado", "") or ""))
 
             if old_estado in ESTADOS_MANUALES_PROTEGIDOS:
                 estado_final = old_estado
@@ -748,6 +774,9 @@ def build_work_queue(
                 estado_final = estado_sugerido
 
             motivo = str(existing_state.get("motivo", "") or "")
+            original_estado = str(existing_state.get("estado", "") or "")
+            if not motivo and original_estado in LEGACY_ESTADOS_MAP:
+                motivo = original_estado
             observacion = str(existing_state.get("observacion", "") or "")
             responsable = str(existing_state.get("responsable", "") or "")
             link_publicacion = str(existing_state.get("link_publicacion", "") or link_publicacion)
@@ -846,17 +875,16 @@ def dashboard(queue_df: pd.DataFrame):
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("En gestión", total)
     c2.metric("Llegó stock", int((queue_df["Estado"] == "LLEGÓ STOCK").sum()) if total else 0)
-    c3.metric("Pend. verificar", int((queue_df["Estado"] == "PENDIENTE VERIFICAR FÍSICO").sum()) if total else 0)
-    c4.metric("Productos nuevos", int((queue_df["Origen"] == "PRODUCTO NUEVO").sum()) if total else 0)
-    c5.metric("Nuevo c/stock", int((queue_df["Estado"] == "PRODUCTO NUEVO CON STOCK").sum()) if total else 0)
+    c3.metric("Pendiente publicar", int((queue_df["Estado"] == "PENDIENTE PUBLICAR").sum()) if total else 0)
+    c4.metric("Productos nuevos c/stock", int((queue_df["Estado"] == "PRODUCTO NUEVO CON STOCK").sum()) if total else 0)
+    c5.metric("En proceso", int((queue_df["Estado"] == "EN PROCESO DE PUBLICACIÓN").sum()) if total else 0)
 
     c6, c7, c8, c9, c10 = st.columns(5)
-    c6.metric("Confirmados", int((queue_df["Estado"] == "STOCK FÍSICO CONFIRMADO").sum()) if total else 0)
-    c7.metric("En proceso", int((queue_df["Estado"] == "EN PROCESO DE PUBLICACIÓN").sum()) if total else 0)
-    c8.metric("No encontrados", int((queue_df["Estado"] == "NO ENCONTRADO FÍSICO").sum()) if total else 0)
-    c9.metric("No publicables", int((queue_df["Estado"] == "NO PUBLICABLE").sum()) if total else 0)
-    c10.metric("Publicados", int((queue_df["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"])).sum()) if total else 0)
-
+    c6.metric("No publicables", int((queue_df["Estado"] == "NO PUBLICABLE").sum()) if total else 0)
+    c7.metric("Publicados", int((queue_df["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"])).sum()) if total else 0)
+    c8.metric("Sin stock", int((queue_df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])).sum()) if total else 0)
+    c9.metric("Cubierto pack", int((queue_df["Estado"] == "CUBIERTO POR PACK").sum()) if total else 0)
+    c10.metric("Cubierto unidad", int((queue_df["Estado"] == "CUBIERTO POR UNIDAD").sum()) if total else 0)
 
 def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df):
     st.sidebar.header("Actualizar inventario")
@@ -924,6 +952,192 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
     return None, False
 
 
+def priority_sort(df: pd.DataFrame) -> pd.DataFrame:
+    priority = {
+        "LLEGÓ STOCK": 1,
+        "PRODUCTO NUEVO CON STOCK": 2,
+        "PENDIENTE PUBLICAR": 3,
+        "EN PROCESO DE PUBLICACIÓN": 4,
+        "CUBIERTO POR PACK": 5,
+        "CUBIERTO POR UNIDAD": 6,
+        "SIN STOCK": 7,
+        "PRODUCTO NUEVO SIN STOCK": 8,
+        "NO PUBLICABLE": 9,
+        "PUBLICADO": 10,
+        "PRODUCTO NUEVO PUBLICADO": 11,
+    }
+
+    out = df.copy()
+    out["_orden"] = out["Estado"].map(priority).fillna(99)
+    out = out.sort_values(["_orden", "StockSistema"], ascending=[True, False]).drop(columns=["_orden"])
+    return out
+
+
+def save_status_change(row: pd.Series, nuevo_estado: str, responsable: str, motivo: str = "", observacion: str = "", link_publicacion: str = ""):
+    payload = {
+        "fecha": now_iso(),
+        "sku": row.get("SKU", ""),
+        "estado": nuevo_estado,
+        "origen": row.get("Origen", ""),
+        "descripcion": row.get("Descripcion", ""),
+        "familia": row.get("Familia", ""),
+        "ean": row.get("EAN", ""),
+        "stock_anterior": float(row.get("StockAnterior", 0) or 0),
+        "stock_actual": float(row.get("StockSistema", 0) or 0),
+        "responsable": responsable.strip(),
+        "motivo": motivo,
+        "observacion": observacion,
+        "link_publicacion": link_publicacion,
+        "accion": "CAMBIO OPERATIVO",
+    }
+    api_upsert_product(payload)
+
+
+def operar_productos_ui(queue_df: pd.DataFrame):
+    st.subheader("Operar productos")
+    st.caption("Flujo rápido para Marketing: iniciar publicación, marcar publicado o clasificar como no publicable.")
+
+    if queue_df.empty:
+        st.info("No hay productos para operar.")
+        return
+
+    responsable = st.text_input("Responsable", key="operador_responsable", placeholder="Nombre de quien está operando")
+
+    col_a, col_b, col_c = st.columns([2, 2, 3])
+
+    modo = col_a.selectbox(
+        "Cola de trabajo",
+        [
+            "Pendientes por publicar",
+            "En proceso de publicación",
+            "No publicables",
+            "Cubiertos por pack/unidad",
+            "Sin stock",
+            "Todos",
+        ],
+        key="operar_modo",
+    )
+
+    familias = ["TODAS"] + sorted(queue_df["Familia"].fillna("").astype(str).unique().tolist())
+    familia = col_b.selectbox("Familia", familias, key="operar_familia")
+    search = col_c.text_input("Buscar SKU o descripción", key="operar_busqueda")
+
+    df = queue_df.copy()
+
+    if modo == "Pendientes por publicar":
+        df = df[df["Estado"].isin(["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"])]
+    elif modo == "En proceso de publicación":
+        df = df[df["Estado"] == "EN PROCESO DE PUBLICACIÓN"]
+    elif modo == "No publicables":
+        df = df[df["Estado"] == "NO PUBLICABLE"]
+    elif modo == "Cubiertos por pack/unidad":
+        df = df[df["Estado"].isin(["CUBIERTO POR PACK", "CUBIERTO POR UNIDAD"])]
+    elif modo == "Sin stock":
+        df = df[df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])]
+
+    if familia != "TODAS":
+        df = df[df["Familia"] == familia]
+
+    if search.strip():
+        s = search.strip().lower()
+        df = df[
+            df["SKU"].astype(str).str.lower().str.contains(s, na=False) |
+            df["Descripcion"].astype(str).str.lower().str.contains(s, na=False)
+        ]
+
+    df = priority_sort(df)
+
+    st.write(f"Productos en esta vista: **{len(df):,}**")
+
+    if df.empty:
+        st.info("No hay productos en esta cola con los filtros actuales.")
+        return
+
+    cantidad = st.slider("Cantidad de productos a mostrar", min_value=5, max_value=50, value=10, step=5)
+
+    for idx, row in df.head(cantidad).iterrows():
+        sku = str(row.get("SKU", ""))
+        estado = str(row.get("Estado", ""))
+        descripcion = str(row.get("Descripcion", ""))
+        familia_actual = str(row.get("Familia", ""))
+        stock = row.get("StockSistema", 0)
+        origen = str(row.get("Origen", ""))
+
+        with st.container(border=True):
+            top1, top2, top3 = st.columns([2, 5, 2])
+            top1.markdown(f"**SKU:** `{sku}`")
+            top2.markdown(f"**{descripcion}**")
+            top3.markdown(f"**Estado:** {estado}")
+
+            info1, info2, info3, info4 = st.columns(4)
+            info1.write(f"**Stock sistema:** {stock:g}" if isinstance(stock, (int, float)) else f"**Stock sistema:** {stock}")
+            info2.write(f"**Familia:** {familia_actual}")
+            info3.write(f"**Origen:** {origen}")
+            info4.write(f"**EAN:** {row.get('EAN', '')}")
+
+            if row.get("RelacionPackUnidad", ""):
+                st.warning(f"{row.get('RelacionPackUnidad', '')}: {row.get('SKURelacionadoPublicado', '')}")
+
+            obs_key = f"obs_{sku}_{idx}"
+            link_key = f"link_{sku}_{idx}"
+            motivo_key = f"motivo_np_{sku}_{idx}"
+
+            observacion = st.text_input("Observación rápida", key=obs_key, placeholder="Opcional")
+            link_publicacion = st.text_input("Link publicación ML", key=link_key, value=str(row.get("LinkPublicacion", "") or ""), placeholder="Pegar link cuando ya esté publicada")
+            motivo_np = st.selectbox("Motivo si no es publicable", MOTIVOS_NO_PUBLICABLE, key=motivo_key)
+
+            b1, b2, b3, b4 = st.columns(4)
+
+            if b1.button("Iniciar publicación", key=f"iniciar_{sku}_{idx}", use_container_width=True):
+                if not responsable.strip():
+                    st.error("Indica responsable antes de guardar.")
+                else:
+                    try:
+                        save_status_change(row, "EN PROCESO DE PUBLICACIÓN", responsable, "Inicio de publicación", observacion, link_publicacion)
+                        st.success(f"{sku} pasó a EN PROCESO DE PUBLICACIÓN")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo guardar: {e}")
+
+            if b2.button("Marcar publicado", key=f"publicado_{sku}_{idx}", use_container_width=True):
+                if not responsable.strip():
+                    st.error("Indica responsable antes de guardar.")
+                elif not link_publicacion.strip():
+                    st.error("Pega el link de publicación antes de marcar como publicado.")
+                else:
+                    try:
+                        estado_publicado = "PRODUCTO NUEVO PUBLICADO" if origen == "PRODUCTO NUEVO" else "PUBLICADO"
+                        save_status_change(row, estado_publicado, responsable, "Publicado correctamente", observacion, link_publicacion)
+                        st.success(f"{sku} marcado como {estado_publicado}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo guardar: {e}")
+
+            if b3.button("No publicable", key=f"nopub_{sku}_{idx}", use_container_width=True):
+                if not responsable.strip():
+                    st.error("Indica responsable antes de guardar.")
+                elif not motivo_np:
+                    st.error("Selecciona un motivo de no publicable.")
+                else:
+                    try:
+                        save_status_change(row, "NO PUBLICABLE", responsable, motivo_np, observacion, link_publicacion)
+                        st.success(f"{sku} marcado como NO PUBLICABLE")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo guardar: {e}")
+
+            if b4.button("Pendiente publicar", key=f"pendiente_{sku}_{idx}", use_container_width=True):
+                if not responsable.strip():
+                    st.error("Indica responsable antes de guardar.")
+                else:
+                    try:
+                        save_status_change(row, "PENDIENTE PUBLICAR", responsable, "Corrección de estado", observacion, link_publicacion)
+                        st.success(f"{sku} quedó como PENDIENTE PUBLICAR")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo guardar: {e}")
+
+
 def marketing_queue_ui(queue_df: pd.DataFrame):
     st.subheader("Cola de Marketing")
 
@@ -955,26 +1169,9 @@ def marketing_queue_ui(queue_df: pd.DataFrame):
             df["Descripcion"].str.lower().str.contains(s, na=False)
         ]
 
-    priority = {
-        "LLEGÓ STOCK": 1,
-        "PRODUCTO NUEVO CON STOCK": 2,
-        "STOCK FÍSICO CONFIRMADO": 3,
-        "PENDIENTE VERIFICAR FÍSICO": 4,
-        "FALTA FOTO": 5,
-        "FALTA INFORMACIÓN": 6,
-        "EN PROCESO DE PUBLICACIÓN": 7,
-        "CUBIERTO POR PACK": 8,
-        "CUBIERTO POR UNIDAD": 9,
-        "SIN STOCK": 10,
-        "PRODUCTO NUEVO SIN STOCK": 11,
-        "NO ENCONTRADO FÍSICO": 12,
-        "NO PUBLICABLE": 13,
-        "PUBLICADO": 14,
-        "PRODUCTO NUEVO PUBLICADO": 15,
-    }
+    df = priority_sort(df)
 
-    df["_orden"] = df["Estado"].map(priority).fillna(99)
-    df = df.sort_values(["_orden", "StockSistema"], ascending=[True, False]).drop(columns=["_orden"])
+
 
     display_cols = [
         "SKU", "Descripcion", "Familia", "EAN", "Origen", "StockAnterior", "StockSistema",
@@ -992,7 +1189,7 @@ def marketing_queue_ui(queue_df: pd.DataFrame):
     )
 
     st.divider()
-    st.subheader("Actualizar estado de un producto")
+    st.subheader("Edición manual avanzada")
 
     sku_options = df["SKU"].tolist()
 
@@ -1119,9 +1316,12 @@ def main():
         estado_api_df=estado_df,
     )
 
-    tabs = st.tabs(["Resumen", "Cola Marketing", "Historial", "Base central"])
+    tabs = st.tabs(["Operar productos", "Resumen", "Cola completa", "Historial", "Base central"])
 
     with tabs[0]:
+        operar_productos_ui(queue_df)
+
+    with tabs[1]:
         dashboard(queue_df)
         st.divider()
         st.subheader("Prioridad de trabajo")
@@ -1130,22 +1330,21 @@ def main():
             preview = queue_df[queue_df["Estado"].isin([
                 "LLEGÓ STOCK",
                 "PRODUCTO NUEVO CON STOCK",
-                "PENDIENTE VERIFICAR FÍSICO",
-                "STOCK FÍSICO CONFIRMADO",
-                "FALTA FOTO",
-                "FALTA INFORMACIÓN",
+                "PENDIENTE PUBLICAR",
+                "EN PROCESO DE PUBLICACIÓN",
             ])].copy()
+            preview = priority_sort(preview)
             st.dataframe(preview.head(100), use_container_width=True, hide_index=True)
         else:
             st.info("Carga el inventario desde la barra lateral para comenzar.")
 
-    with tabs[1]:
+    with tabs[2]:
         marketing_queue_ui(queue_df)
 
-    with tabs[2]:
+    with tabs[3]:
         historial_ui()
 
-    with tabs[3]:
+    with tabs[4]:
         status_ui(estado_df, inv_current_df)
 
 
