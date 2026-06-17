@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.4 - fix botones informes"
+APP_VERSION = "V6.5 - acciones por etapa"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -1071,7 +1071,7 @@ def operar_productos_ui(queue_df: pd.DataFrame):
     inject_operational_css()
 
     st.subheader("Picking de productos para publicar")
-    st.caption("Pantalla rápida para revisar productos con stock Kame y decidir qué pasa con cada SKU.")
+    st.caption("Pantalla rápida con acciones según etapa: revisar/pickear, reportar faltantes o cerrar como publicado.")
 
     if queue_df.empty:
         st.info("No hay productos para operar. Primero carga el LibroInventario desde la barra lateral.")
@@ -1191,34 +1191,57 @@ def operar_productos_ui(queue_df: pd.DataFrame):
         with top_right:
             st.markdown(f'<span class="estado-pill">{estado}</span>', unsafe_allow_html=True)
 
-        b1, b2, b3 = st.columns(3)
+        es_pendiente_pickear = estado in ["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"]
+        es_pickeado_publicar = estado in ["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"]
 
-        if b1.button("Pickeado para publicar", key=f"pickeado_{sku}_{idx}", use_container_width=True):
-            try:
-                save_status_change(row, "PICKEADO PARA PUBLICAR", responsable, "Pickeado para publicar", "", "")
-                st.success(f"{sku} pasó a PICKEADO PARA PUBLICAR")
+        if es_pendiente_pickear:
+            b1, b2, b3 = st.columns(3)
+
+            if b1.button("Pickeado para publicar", key=f"pickeado_{sku}_{idx}", use_container_width=True):
+                try:
+                    save_status_change(row, "PICKEADO PARA PUBLICAR", responsable, "Pickeado para publicar", "", "")
+                    st.success(f"{sku} pasó a PICKEADO PARA PUBLICAR")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
+
+            if b2.button("Faltante físico", key=f"faltante_fisico_{sku}_{idx}", use_container_width=True):
+                try:
+                    save_status_change(
+                        row,
+                        "FALTANTE FÍSICO CON STOCK KAME",
+                        responsable,
+                        "Faltante físico con stock en Kame",
+                        "",
+                        ""
+                    )
+                    st.warning(f"{sku} enviado a cola: FALTANTE FÍSICO CON STOCK KAME")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
+
+            if b3.button("No publicable", key=f"abrir_nopub_{sku}_{idx}", use_container_width=True):
+                st.session_state["no_publicable_sku_abierto"] = sku
                 st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo guardar: {e}")
 
-        if b2.button("Faltante físico", key=f"faltante_fisico_{sku}_{idx}", use_container_width=True):
-            try:
-                save_status_change(
-                    row,
-                    "FALTANTE FÍSICO CON STOCK KAME",
-                    responsable,
-                    "Faltante físico con stock en Kame",
-                    "",
-                    ""
-                )
-                st.warning(f"{sku} enviado a cola: FALTANTE FÍSICO CON STOCK KAME")
+        elif es_pickeado_publicar:
+            b1, b2 = st.columns(2)
+
+            if b1.button("Publicado", key=f"publicado_{sku}_{idx}", use_container_width=True):
+                try:
+                    estado_publicado = "PRODUCTO NUEVO PUBLICADO" if origen == "PRODUCTO NUEVO" else "PUBLICADO"
+                    save_status_change(row, estado_publicado, responsable, "Publicado correctamente", "", "")
+                    st.success(f"{sku} marcado como {estado_publicado}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
+
+            if b2.button("No publicable", key=f"abrir_nopub_{sku}_{idx}", use_container_width=True):
+                st.session_state["no_publicable_sku_abierto"] = sku
                 st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo guardar: {e}")
 
-        if b3.button("No publicable", key=f"abrir_nopub_{sku}_{idx}", use_container_width=True):
-            st.session_state["no_publicable_sku_abierto"] = sku
-            st.rerun()
+        else:
+            st.caption("Esta cola es solo de consulta. Para correcciones usa el módulo Administrador.")
 
         if st.session_state.get("no_publicable_sku_abierto") == sku:
             st.markdown('<div class="section-soft">', unsafe_allow_html=True)
