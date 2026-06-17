@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.7 - motivos cerrados no publicable"
+APP_VERSION = "V6.9 - sync segundo plano"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -26,6 +26,21 @@ DEFAULT_ADMIN_PASSWORD = "aurora_admin_2026"
 APP_USER_OPERACION = "OPERACION"
 APP_USER_ADMIN = "ADMINISTRADOR"
 APP_USER_SISTEMA = "SISTEMA"
+ESTADO_API_COLUMNS = [
+    "sku", "estado", "origen", "descripcion", "familia", "ean",
+    "stock_anterior", "stock_actual", "responsable", "motivo",
+    "observacion", "link_publicacion", "accion", "estado_anterior",
+    "fecha_actualizacion"
+]
+
+INVENTARIO_API_COLUMNS = [
+    "sku", "descripcion", "familia", "stock_actual",
+    "costo_promedio", "saldo_valor", "fecha_carga"
+]
+
+SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=3)
+SYNC_LOCK = threading.Lock()
+
 
 ESTADOS = [
     "SIN STOCK",
@@ -313,8 +328,25 @@ def api_call(action: str, payload: Optional[dict] = None, timeout: int = 60) -> 
     return data
 
 
-def api_get_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    data = api_call("get_data", {}, timeout=60)
+def api_get_data(force_refresh: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Modo rápido:
+    - Primera carga: lee desde Apps Script / Google Sheets.
+    - Luego usa memoria de sesión.
+    - Cada acción actualiza la memoria local.
+    - Solo vuelve a consultar Google Sheets si el usuario presiona "Actualizar datos".
+    """
+    if (
+        not force_refresh
+        and "estado_df_cache" in st.session_state
+        and "inv_df_cache" in st.session_state
+    ):
+        return (
+            st.session_state["estado_df_cache"].copy(),
+            st.session_state["inv_df_cache"].copy()
+        )
+
+    data = api_call("get_data", {}, timeout=90)
     estado_rows = data.get("estado_actual", [])
     inventario_rows = data.get("inventario_actual", [])
 
@@ -322,80 +354,309 @@ def api_get_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     inv_df = pd.DataFrame(inventario_rows)
 
     if estado_df.empty:
-        estado_df = pd.DataFrame(columns=[
-            "sku", "estado", "origen", "descripcion", "familia", "ean",
-            "stock_anterior", "stock_actual", "responsable", "motivo",
-            "observacion", "link_publicacion", "accion", "estado_anterior",
-            "fecha_actualizacion"
-        ])
+        estado_df = pd.DataFrame(columns=ESTADO_API_COLUMNS)
+    else:
+        for col in ESTADO_API_COLUMNS:
+            if col not in estado_df.columns:
+                estado_df[col] = ""
+        estado_df = estado_df[ESTADO_API_COLUMNS]
 
     if inv_df.empty:
-        inv_df = pd.DataFrame(columns=[
-            "sku", "descripcion", "familia", "stock_actual",
-            "costo_promedio", "saldo_valor", "fecha_carga"
-        ])
+        inv_df = pd.DataFrame(columns=INVENTARIO_API_COLUMNS)
+    else:
+        for col in INVENTARIO_API_COLUMNS:
+            if col not in inv_df.columns:
+                inv_df[col] = ""
+        inv_df = inv_df[INVENTARIO_API_COLUMNS]
+
+    st.session_state["estado_df_cache"] = estado_df.copy()
+    st.session_state["inv_df_cache"] = inv_df.copy()
+    st.session_state["data_cache_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     return estado_df, inv_df
 
 
-def api_replace_inventory(inv_df: pd.DataFrame, usuario: str, productos_nuevos: int, llegaron_stock: int) -> None:
+def clear_session_data_cache():
+    st.session_state.pop("estado_df_cache", None)
+    st.session_state.pop("inv_df_cache", None)
+    st.session_state.pop("data_cache_loaded_at", None)
+
+
+def payload_to_estado_row(payload: dict, estado_anterior: str = "") -> dict:
+    return {
+        "sku": clean_sku(payload.get("sku", "")),
+        "estado": str(payload.get("estado", "") or ""),
+        "origen": str(payload.get("origen", "") or ""),
+        "descripcion": str(payload.get("descripcion", "") or ""),
+        "familia": str(payload.get("familia", "") or ""),
+        "ean": str(payload.get("ean", "") or ""),
+        "stock_anterior": payload.get("stock_anterior", 0) or 0,
+        "stock_actual": payload.get("stock_actual", 0) or 0,
+        "responsable": str(payload.get("responsable", "") or ""),
+        "motivo": str(payload.get("motivo", "") or ""),
+        "observacion": str(payload.get("observacion", "") or ""),
+        "link_publicacion": str(payload.get("link_publicacion", "") or ""),
+        "accion": str(payload.get("accion", "") or ""),
+        "estado_anterior": estado_anterior or str(payload.get("estado_anterior", "") or ""),
+        "fecha_actualizacion": str(payload.get("fecha", "") or now_iso()),
+    }
+
+
+def update_estado_cache_from_payload(payload: dict):
+    sku = clean_sku(payload.get("sku", ""))
+
+    if not sku:
+        return
+
+    if "estado_df_cache" not in st.session_state:
+        return
+
+    df = st.session_state["estado_df_cache"].copy()
+
+    for col in ESTADO_API_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    if df.empty:
+        estado_anterior = ""
+        new_row = payload_to_estado_row(payload, estado_anterior)
+        df = pd.DataFrame([new_row], columns=ESTADO_API_COLUMNS)
+    else:
+        df["sku"] = df["sku"].map(clean_sku)
+        mask = df["sku"] == sku
+
+        if mask.any():
+            estado_anterior = str(df.loc[mask, "estado"].iloc[0] or "")
+            new_row = payload_to_estado_row(payload, estado_anterior)
+
+            for col in ESTADO_API_COLUMNS:
+                df.loc[mask, col] = new_row.get(col, "")
+        else:
+            new_row = payload_to_estado_row(payload, "")
+            df = pd.concat([df, pd.DataFrame([new_row], columns=ESTADO_API_COLUMNS)], ignore_index=True)
+
+    st.session_state["estado_df_cache"] = df[ESTADO_API_COLUMNS].copy()
+
+
+def update_estado_cache_from_payloads(items: List[dict]):
+    for payload in items:
+        update_estado_cache_from_payload(payload)
+
+
+def update_inventory_cache_from_rows(rows: List[dict], fecha_carga: str):
+    out_rows = []
+
+    for item in rows:
+        out_rows.append({
+            "sku": clean_sku(item.get("sku", "")),
+            "descripcion": str(item.get("descripcion", "") or ""),
+            "familia": str(item.get("familia", "") or ""),
+            "stock_actual": item.get("stock_actual", 0) or 0,
+            "costo_promedio": item.get("costo_promedio", 0) or 0,
+            "saldo_valor": item.get("saldo_valor", 0) or 0,
+            "fecha_carga": fecha_carga,
+        })
+
+    inv_df = pd.DataFrame(out_rows, columns=INVENTARIO_API_COLUMNS)
+    st.session_state["inv_df_cache"] = inv_df.copy()
+
+
+
+def replace_inventory_worker(payload: dict):
+    api_call("replace_inventory", payload, timeout=240)
+
+
+def api_replace_inventory(
+    inv_df: pd.DataFrame,
+    usuario: str,
+    productos_nuevos: int,
+    llegaron_stock: int,
+    background: bool = True,
+) -> None:
     rows = []
-    for _, r in inv_df.iterrows():
+    fecha_carga = now_iso()
+
+    for _, row in inv_df.iterrows():
         rows.append({
-            "sku": clean_sku(r.get("SKU", "")),
-            "descripcion": str(r.get("Articulo", "") or ""),
-            "familia": str(r.get("Familia", "") or ""),
-            "stock_actual": float(r.get("Stock", 0) or 0),
-            "costo_promedio": float(r.get("CostoPromedio", 0) or 0),
-            "saldo_valor": float(r.get("SaldoValor", 0) or 0),
+            "sku": row["SKU"],
+            "descripcion": row.get("Articulo", ""),
+            "familia": row.get("Familia", ""),
+            "stock_actual": float(row.get("Stock", 0) or 0),
+            "costo_promedio": float(row.get("CostoPromedio", 0) or 0),
+            "saldo_valor": float(row.get("SaldoValor", 0) or 0),
         })
 
     payload = {
         "usuario": usuario,
-        "fecha_carga": now_iso(),
+        "fecha_carga": fecha_carga,
         "productos_nuevos": int(productos_nuevos),
         "llegaron_stock": int(llegaron_stock),
         "items": rows,
     }
 
-    api_call("replace_inventory", payload, timeout=180)
+    update_inventory_cache_from_rows(rows, fecha_carga)
+
+    if not background:
+        api_call("replace_inventory", payload, timeout=240)
+        return
+
+    init_sync_state()
+    sync_status_increment_pending(1)
+
+    future = SYNC_EXECUTOR.submit(replace_inventory_worker, payload)
+
+    def _done_callback(fut):
+        try:
+            fut.result()
+            sync_status_mark_ok(1)
+        except Exception as e:
+            sync_status_mark_error(e, 1)
+
+    future.add_done_callback(_done_callback)
 
 
-def api_upsert_product(payload: dict) -> None:
-    api_call("upsert_product", payload, timeout=60)
+def init_sync_state():
+    if "sync_pending_count" not in st.session_state:
+        st.session_state["sync_pending_count"] = 0
+    if "sync_ok_count" not in st.session_state:
+        st.session_state["sync_ok_count"] = 0
+    if "sync_error_count" not in st.session_state:
+        st.session_state["sync_error_count"] = 0
+    if "sync_errors" not in st.session_state:
+        st.session_state["sync_errors"] = []
+    if "sync_last_ok" not in st.session_state:
+        st.session_state["sync_last_ok"] = ""
+
+
+def sync_status_increment_pending(amount: int = 1):
+    init_sync_state()
+    st.session_state["sync_pending_count"] += amount
+
+
+def sync_status_mark_ok(amount: int = 1):
+    with SYNC_LOCK:
+        # Los callbacks pueden ejecutarse fuera del flujo normal de Streamlit.
+        # Por eso esta función solo se usa cuando el estado de sesión está disponible.
+        try:
+            st.session_state["sync_pending_count"] = max(0, st.session_state.get("sync_pending_count", 0) - amount)
+            st.session_state["sync_ok_count"] = st.session_state.get("sync_ok_count", 0) + amount
+            st.session_state["sync_last_ok"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+
+def sync_status_mark_error(error_message: str, amount: int = 1):
+    with SYNC_LOCK:
+        try:
+            st.session_state["sync_pending_count"] = max(0, st.session_state.get("sync_pending_count", 0) - amount)
+            st.session_state["sync_error_count"] = st.session_state.get("sync_error_count", 0) + amount
+            errors = st.session_state.get("sync_errors", [])
+            errors.append({
+                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "error": str(error_message),
+            })
+            st.session_state["sync_errors"] = errors[-20:]
+        except Exception:
+            pass
+
+
+def sync_upsert_worker(payload: dict):
+    api_call("upsert_product", payload, timeout=90)
+
+
+def sync_bulk_worker(items: List[dict], chunk_size: int = 250):
+    chunks = chunk_list(items, chunk_size)
+
+    for chunk in chunks:
+        api_call(
+            "bulk_upsert_products",
+            {"items": chunk},
+            timeout=180
+        )
+
+
+def api_upsert_product(payload: dict, background: bool = True) -> None:
+    """
+    Guarda un cambio individual.
+    En modo background:
+    - actualiza la memoria local al instante,
+    - envía a Google Sheets en segundo plano.
+    """
+    update_estado_cache_from_payload(payload)
+
+    if not background:
+        api_call("upsert_product", payload, timeout=90)
+        return
+
+    init_sync_state()
+    sync_status_increment_pending(1)
+
+    future = SYNC_EXECUTOR.submit(sync_upsert_worker, payload)
+
+    def _done_callback(fut):
+        try:
+            fut.result()
+            sync_status_mark_ok(1)
+        except Exception as e:
+            sync_status_mark_error(e, 1)
+
+    future.add_done_callback(_done_callback)
 
 
 def chunk_list(items: List[dict], chunk_size: int) -> List[List[dict]]:
     return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
 
 
-def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250) -> None:
+def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250, background: bool = True) -> None:
     """
-    Guarda alertas/estados automáticos por bloques para evitar timeout.
-    Con Apps Script V5.5 el guardado interno también es por lote.
+    Guarda cambios masivos.
+    En modo background:
+    - actualiza cache local al instante,
+    - manda los bloques a Google Sheets en segundo plano.
     """
     if not items:
         return
 
+    update_estado_cache_from_payloads(items)
+
     chunks = chunk_list(items, chunk_size)
-    total = len(items)
+    total_chunks = len(chunks)
 
-    progress = st.sidebar.progress(0, text=f"Guardando cambios 0/{total}")
+    if not background:
+        progress = st.sidebar.progress(0, text=f"Guardando cambios 0/{len(items)}")
+        saved = 0
 
-    saved = 0
+        for chunk in chunks:
+            api_call("bulk_upsert_products", {"items": chunk}, timeout=180)
+            saved += len(chunk)
+            progress.progress(
+                min(saved / len(items), 1.0),
+                text=f"Guardando cambios {saved}/{len(items)}"
+            )
+
+        progress.empty()
+        return
+
+    init_sync_state()
+    sync_status_increment_pending(total_chunks)
+
+    def _send_chunk(chunk: List[dict]):
+        api_call("bulk_upsert_products", {"items": chunk}, timeout=180)
+        return len(chunk)
+
     for chunk in chunks:
-        api_call(
-            "bulk_upsert_products",
-            {"items": chunk},
-            timeout=150
-        )
-        saved += len(chunk)
-        progress.progress(
-            min(saved / total, 1.0),
-            text=f"Guardando cambios {saved}/{total}"
-        )
+        future = SYNC_EXECUTOR.submit(_send_chunk, chunk)
 
-    progress.empty()
+        def _done_callback(fut):
+            try:
+                fut.result()
+                sync_status_mark_ok(1)
+            except Exception as e:
+                sync_status_mark_error(e, 1)
+
+        future.add_done_callback(_done_callback)
+
+
 
 
 # ============================================================
@@ -981,7 +1242,7 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
             productos_nuevos = int((queue_tmp["Origen"] == "PRODUCTO NUEVO").sum()) if not queue_tmp.empty else 0
             llegaron_stock = int((queue_tmp["Estado"] == "LLEGÓ STOCK").sum()) if not queue_tmp.empty else 0
 
-            st.sidebar.info("Guardando inventario central en Google Sheets...")
+            st.sidebar.info("Enviando inventario a Google Sheets en segundo plano...")
             api_replace_inventory(
                 inv_df=inv_new_df,
                 usuario=usuario.strip(),
@@ -2174,6 +2435,26 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
 def main():
     page_config()
     st.sidebar.caption(f"Versión: {APP_VERSION}")
+    st.sidebar.caption("Modo rápido + sync segundo plano")
+
+    init_sync_state()
+    pending_sync = st.session_state.get("sync_pending_count", 0)
+    ok_sync = st.session_state.get("sync_ok_count", 0)
+    error_sync = st.session_state.get("sync_error_count", 0)
+
+    if pending_sync:
+        st.sidebar.warning(f"Sincronizando con Google Sheets: {pending_sync} pendiente(s)")
+    else:
+        st.sidebar.success("Sincronización al día")
+
+    if error_sync:
+        st.sidebar.error(f"Errores de sincronización: {error_sync}")
+        with st.sidebar.expander("Ver últimos errores"):
+            st.write(st.session_state.get("sync_errors", []))
+
+    if ok_sync:
+        st.sidebar.caption(f"Sincronizaciones OK: {ok_sync}")
+
     validate_base_files()
 
     try:
@@ -2183,6 +2464,14 @@ def main():
     except Exception as e:
         st.error(f"Error leyendo archivos base: {e}")
         st.stop()
+
+    cache_loaded_at = st.session_state.get("data_cache_loaded_at", "")
+    if cache_loaded_at:
+        st.sidebar.caption(f"Datos en memoria: {cache_loaded_at}")
+
+    if st.sidebar.button("Actualizar datos desde Google Sheets"):
+        clear_session_data_cache()
+        st.rerun()
 
     try:
         estado_df, inv_api_df = api_get_data()
