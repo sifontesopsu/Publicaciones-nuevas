@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V5.8 - pickeo operativo"
+APP_VERSION = "V6.3 - sin responsable visible"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -22,6 +22,10 @@ PACKS_FILE = DATA_DIR / "packs.xlsx"
 # En Streamlit Cloud puedes sobrescribirla desde Secrets si cambia el despliegue.
 DEFAULT_APP_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw8k8UkeHtHdAcAFUKvBtHfELH7byRdM0hXao5-OjqeCbI1KL3JxaQfFebgq7_4fzoy/exec"
 DEFAULT_APP_SCRIPT_TOKEN = "aurora_publicaciones_2026"
+DEFAULT_ADMIN_PASSWORD = "aurora_admin_2026"
+APP_USER_OPERACION = "OPERACION"
+APP_USER_ADMIN = "ADMINISTRADOR"
+APP_USER_SISTEMA = "SISTEMA"
 
 ESTADOS = [
     "SIN STOCK",
@@ -383,7 +387,7 @@ def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250) -> None:
     chunks = chunk_list(items, chunk_size)
     total = len(items)
 
-    progress = st.sidebar.progress(0, text=f"Guardando alertas automáticas 0/{total}")
+    progress = st.sidebar.progress(0, text=f"Guardando cambios 0/{total}")
 
     saved = 0
     for chunk in chunks:
@@ -395,7 +399,7 @@ def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250) -> None:
         saved += len(chunk)
         progress.progress(
             min(saved / total, 1.0),
-            text=f"Guardando alertas automáticas {saved}/{total}"
+            text=f"Guardando cambios {saved}/{total}"
         )
 
     progress.empty()
@@ -861,6 +865,72 @@ def page_config():
     st.title(APP_TITLE)
 
 
+def inject_operational_css():
+    st.markdown("""
+    <style>
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1500px;
+    }
+    div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e8ebf0;
+        padding: 10px 12px;
+        border-radius: 12px;
+    }
+    .aurora-card {
+        border: 1px solid #dfe3ea;
+        border-radius: 14px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+        background: #ffffff;
+        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    }
+    .aurora-sku {
+        font-size: 0.90rem;
+        font-weight: 700;
+        color: #111827;
+    }
+    .aurora-desc {
+        font-size: 1.02rem;
+        font-weight: 700;
+        color: #111827;
+        margin-bottom: 4px;
+    }
+    .aurora-meta {
+        font-size: 0.83rem;
+        color: #4b5563;
+    }
+    .estado-pill {
+        display: inline-block;
+        padding: 4px 9px;
+        border-radius: 999px;
+        background: #f3f4f6;
+        color: #111827;
+        font-size: 0.80rem;
+        font-weight: 700;
+    }
+    .stock-pill {
+        display: inline-block;
+        padding: 4px 9px;
+        border-radius: 999px;
+        background: #ecfdf3;
+        color: #027a48;
+        font-size: 0.80rem;
+        font-weight: 700;
+    }
+    .section-soft {
+        background: #f8fafc;
+        border: 1px solid #e5e7eb;
+        border-radius: 14px;
+        padding: 12px 14px;
+        margin-bottom: 12px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 def validate_base_files():
     missing = []
     for p in [MAESTRO_FILE, PUBLICACIONES_FILE, PACKS_FILE]:
@@ -895,17 +965,13 @@ def dashboard(queue_df: pd.DataFrame):
 def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df):
     st.sidebar.header("Actualizar inventario")
 
-    usuario = st.sidebar.text_input("Responsable carga inventario", value="")
+    usuario = APP_USER_SISTEMA
     uploaded_inventory = st.sidebar.file_uploader("Subir LibroInventario.xlsx", type=["xlsx"])
 
     if uploaded_inventory is None:
         return None, False
 
     if st.sidebar.button("Procesar y guardar inventario"):
-        if not usuario.strip():
-            st.sidebar.error("Debes indicar responsable antes de guardar.")
-            return None, False
-
         try:
             inv_new_df = load_inventory_from_upload(uploaded_inventory)
             prev_map = previous_stock_map_from_inventory(inv_current_df)
@@ -981,7 +1047,7 @@ def priority_sort(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def save_status_change(row: pd.Series, nuevo_estado: str, responsable: str, motivo: str = "", observacion: str = "", link_publicacion: str = ""):
+def save_status_change(row: pd.Series, nuevo_estado: str, responsable: str = APP_USER_OPERACION, motivo: str = "", observacion: str = "", link_publicacion: str = ""):
     payload = {
         "fecha": now_iso(),
         "sku": row.get("SKU", ""),
@@ -992,7 +1058,7 @@ def save_status_change(row: pd.Series, nuevo_estado: str, responsable: str, moti
         "ean": row.get("EAN", ""),
         "stock_anterior": float(row.get("StockAnterior", 0) or 0),
         "stock_actual": float(row.get("StockSistema", 0) or 0),
-        "responsable": responsable.strip(),
+        "responsable": APP_USER_OPERACION,
         "motivo": motivo,
         "observacion": observacion,
         "link_publicacion": link_publicacion,
@@ -1002,34 +1068,46 @@ def save_status_change(row: pd.Series, nuevo_estado: str, responsable: str, moti
 
 
 def operar_productos_ui(queue_df: pd.DataFrame):
-    st.subheader("Operar productos")
-    st.caption("Flujo rápido para Marketing: pickear/revisar, enviar a publicación, reportar faltante físico o clasificar como no publicable.")
+    inject_operational_css()
+
+    st.subheader("Picking de productos para publicar")
+    st.caption("Pantalla rápida para revisar productos con stock Kame y decidir qué pasa con cada SKU.")
 
     if queue_df.empty:
-        st.info("No hay productos para operar.")
+        st.info("No hay productos para operar. Primero carga el LibroInventario desde la barra lateral.")
         return
 
-    responsable = st.text_input("Responsable", key="operador_responsable", placeholder="Nombre de quien está operando")
+    pendiente_count = int((queue_df["Estado"].isin(["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"])).sum())
+    pickeado_count = int((queue_df["Estado"].isin(["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"])).sum())
+    faltante_count = int((queue_df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME").sum())
+    no_pub_count = int((queue_df["Estado"] == "NO PUBLICABLE").sum())
 
-    col_a, col_b, col_c = st.columns([2, 2, 3])
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Por pickear/revisar", pendiente_count)
+    k2.metric("Pickeados para publicar", pickeado_count)
+    k3.metric("Faltante físico", faltante_count)
+    k4.metric("No publicables", no_pub_count)
 
-    modo = col_a.selectbox(
-        "Cola de trabajo",
-        [
-            "Pendientes por pickear/revisar",
-            "Pickeados para publicar",
-            "Faltante físico con stock Kame",
-            "No publicables",
-            "Cubiertos por pack/unidad",
-            "Sin stock Kame",
-            "Todos",
-        ],
-        key="operar_modo",
-    )
+    responsable = APP_USER_OPERACION
 
-    familias = ["TODAS"] + sorted(queue_df["Familia"].fillna("").astype(str).unique().tolist())
-    familia = col_b.selectbox("Familia", familias, key="operar_familia")
-    search = col_c.text_input("Buscar SKU o descripción", key="operar_busqueda")
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([1.6, 1.4, 2.2])
+        modo = c1.selectbox(
+            "Cola",
+            [
+                "Pendientes por pickear/revisar",
+                "Pickeados para publicar",
+                "Faltante físico con stock Kame",
+                "No publicables",
+                "Cubiertos por pack/unidad",
+                "Sin stock Kame",
+                "Todos",
+            ],
+            key="operar_modo",
+        )
+        familias = ["TODAS"] + sorted(queue_df["Familia"].fillna("").astype(str).unique().tolist())
+        familia = c2.selectbox("Familia", familias, key="operar_familia")
+        search = c3.text_input("Buscar", key="operar_busqueda", placeholder="SKU o descripción")
 
     df = queue_df.copy()
 
@@ -1058,18 +1136,20 @@ def operar_productos_ui(queue_df: pd.DataFrame):
 
     df = priority_sort(df)
 
-    st.write(f"Productos en esta vista: **{len(df):,}**")
+    left, right = st.columns([2, 1])
+    left.markdown(f"**Productos en esta cola:** {len(df):,}")
+    cantidad = right.selectbox("Mostrar", [10, 20, 50, 100], index=1, key="operar_cantidad")
 
     if modo == "Faltante físico con stock Kame":
         reporte_cols = [
             "SKU", "Descripcion", "Familia", "EAN", "StockSistema", "Estado",
-            "Motivo", "Observacion", "Responsable", "FechaUltimaGestion"
+            "Motivo", "Observacion", "FechaUltimaGestion"
         ]
         reporte_cols = [c for c in reporte_cols if c in df.columns]
         if not df.empty:
             st.download_button(
                 "Descargar informe para bodega",
-                data=to_excel_bytes(df[reporte_cols]),
+                data=export_excel(df[reporte_cols]),
                 file_name=f"informe_faltante_fisico_stock_kame_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
@@ -1079,85 +1159,95 @@ def operar_productos_ui(queue_df: pd.DataFrame):
         st.info("No hay productos en esta cola con los filtros actuales.")
         return
 
-    cantidad = st.slider("Cantidad de productos a mostrar", min_value=5, max_value=50, value=10, step=5)
+    if "no_publicable_sku_abierto" not in st.session_state:
+        st.session_state["no_publicable_sku_abierto"] = ""
 
-    for idx, row in df.head(cantidad).iterrows():
+    for idx, row in df.head(int(cantidad)).iterrows():
         sku = str(row.get("SKU", ""))
         estado = str(row.get("Estado", ""))
         descripcion = str(row.get("Descripcion", ""))
         familia_actual = str(row.get("Familia", ""))
         stock = row.get("StockSistema", 0)
         origen = str(row.get("Origen", ""))
+        ean = str(row.get("EAN", "") or "")
+        relacion = str(row.get("RelacionPackUnidad", "") or "")
+        relacionado = str(row.get("SKURelacionadoPublicado", "") or "")
 
-        with st.container(border=True):
-            top1, top2, top3 = st.columns([2, 5, 2])
-            top1.markdown(f"**SKU:** `{sku}`")
-            top2.markdown(f"**{descripcion}**")
-            top3.markdown(f"**Estado:** {estado}")
+        st.markdown('<div class="aurora-card">', unsafe_allow_html=True)
 
-            info1, info2, info3, info4 = st.columns(4)
-            info1.write(f"**Stock sistema:** {stock:g}" if isinstance(stock, (int, float)) else f"**Stock sistema:** {stock}")
-            info2.write(f"**Familia:** {familia_actual}")
-            info3.write(f"**Origen:** {origen}")
-            info4.write(f"**EAN:** {row.get('EAN', '')}")
+        top_left, top_mid, top_right = st.columns([1.3, 4.7, 1.7])
+        with top_left:
+            st.markdown(f'<div class="aurora-sku">SKU: <code>{sku}</code></div>', unsafe_allow_html=True)
+            stock_text = f"{stock:g}" if isinstance(stock, (int, float)) else str(stock)
+            st.markdown(f'<span class="stock-pill">Stock Kame: {stock_text}</span>', unsafe_allow_html=True)
+        with top_mid:
+            st.markdown(f'<div class="aurora-desc">{descripcion}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="aurora-meta">Familia: {familia_actual} &nbsp; | &nbsp; Origen: {origen} &nbsp; | &nbsp; EAN: {ean}</div>',
+                unsafe_allow_html=True
+            )
+            if relacion:
+                st.warning(f"{relacion}: {relacionado}")
+        with top_right:
+            st.markdown(f'<span class="estado-pill">{estado}</span>', unsafe_allow_html=True)
 
-            if row.get("RelacionPackUnidad", ""):
-                st.warning(f"{row.get('RelacionPackUnidad', '')}: {row.get('SKURelacionadoPublicado', '')}")
+        b1, b2, b3 = st.columns(3)
 
-            obs_key = f"obs_{sku}_{idx}"
-            motivo_key = f"motivo_np_libre_{sku}_{idx}"
+        if b1.button("Pickeado para publicar", key=f"pickeado_{sku}_{idx}", use_container_width=True):
+            try:
+                save_status_change(row, "PICKEADO PARA PUBLICAR", responsable, "Pickeado para publicar", "", "")
+                st.success(f"{sku} pasó a PICKEADO PARA PUBLICAR")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo guardar: {e}")
 
-            observacion = st.text_input("Observación rápida", key=obs_key, placeholder="Opcional")
+        if b2.button("Faltante físico", key=f"faltante_fisico_{sku}_{idx}", use_container_width=True):
+            try:
+                save_status_change(
+                    row,
+                    "FALTANTE FÍSICO CON STOCK KAME",
+                    responsable,
+                    "Faltante físico con stock en Kame",
+                    "",
+                    ""
+                )
+                st.warning(f"{sku} enviado a cola: FALTANTE FÍSICO CON STOCK KAME")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo guardar: {e}")
+
+        if b3.button("No publicable", key=f"abrir_nopub_{sku}_{idx}", use_container_width=True):
+            st.session_state["no_publicable_sku_abierto"] = sku
+            st.rerun()
+
+        if st.session_state.get("no_publicable_sku_abierto") == sku:
+            st.markdown('<div class="section-soft">', unsafe_allow_html=True)
+            st.warning("Escribe el motivo. Este motivo queda para auditoría y para no volver a revisar el mismo SKU.")
             motivo_np = st.text_area(
                 "Motivo no publicable",
-                key=motivo_key,
-                placeholder="Escribe el motivo solo si marcarás el producto como no publicable.",
-                height=80,
+                key=f"motivo_np_libre_{sku}_{idx}",
+                placeholder="Ejemplo: producto descontinuado, no rentable, duplicado, no corresponde vender individual, etc.",
+                height=90,
             )
-
-            b1, b2, b3 = st.columns(3)
-
-            if b1.button("Pickeado para publicar", key=f"pickeado_{sku}_{idx}", use_container_width=True):
-                if not responsable.strip():
-                    st.error("Indica responsable antes de guardar.")
+            csave, ccancel = st.columns(2)
+            if csave.button("Confirmar no publicable", key=f"confirmar_nopub_{sku}_{idx}", use_container_width=True):
+                if not motivo_np.strip():
+                    st.error("Escribe el motivo antes de confirmar.")
                 else:
                     try:
-                        save_status_change(row, "PICKEADO PARA PUBLICAR", responsable, "Pickeado para publicar", observacion, "")
-                        st.success(f"{sku} pasó a PICKEADO PARA PUBLICAR")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"No se pudo guardar: {e}")
-
-            if b2.button("Faltante físico", key=f"faltante_fisico_{sku}_{idx}", use_container_width=True):
-                if not responsable.strip():
-                    st.error("Indica responsable antes de guardar.")
-                else:
-                    try:
-                        save_status_change(
-                            row,
-                            "FALTANTE FÍSICO CON STOCK KAME",
-                            responsable,
-                            "Faltante físico con stock en Kame",
-                            observacion,
-                            ""
-                        )
-                        st.warning(f"{sku} enviado a cola: FALTANTE FÍSICO CON STOCK KAME")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"No se pudo guardar: {e}")
-
-            if b3.button("No publicable", key=f"nopub_{sku}_{idx}", use_container_width=True):
-                if not responsable.strip():
-                    st.error("Indica responsable antes de guardar.")
-                elif not motivo_np.strip():
-                    st.error("Escribe el motivo antes de marcar como no publicable.")
-                else:
-                    try:
-                        save_status_change(row, "NO PUBLICABLE", responsable, motivo_np.strip(), observacion, "")
+                        save_status_change(row, "NO PUBLICABLE", responsable, motivo_np.strip(), "", "")
+                        st.session_state["no_publicable_sku_abierto"] = ""
                         st.success(f"{sku} marcado como NO PUBLICABLE")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo guardar: {e}")
+
+            if ccancel.button("Cancelar", key=f"cancelar_nopub_{sku}_{idx}", use_container_width=True):
+                st.session_state["no_publicable_sku_abierto"] = ""
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 def marketing_queue_ui(queue_df: pd.DataFrame):
@@ -1198,7 +1288,7 @@ def marketing_queue_ui(queue_df: pd.DataFrame):
     display_cols = [
         "SKU", "Descripcion", "Familia", "EAN", "Origen", "StockAnterior", "StockSistema",
         "Estado", "EstadoSugerido", "RelacionPackUnidad", "SKURelacionadoPublicado",
-        "Motivo", "Responsable", "Observacion", "LinkPublicacion"
+        "Motivo", "Observacion", "LinkPublicacion"
     ]
 
     st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
@@ -1256,7 +1346,7 @@ def marketing_queue_ui(queue_df: pd.DataFrame):
             "ean": selected_row.get("EAN", ""),
             "stock_anterior": float(selected_row.get("StockAnterior", 0) or 0),
             "stock_actual": float(selected_row.get("StockSistema", 0) or 0),
-            "responsable": responsable.strip(),
+            "responsable": responsable.strip() or APP_USER_ADMIN,
             "motivo": motivo,
             "observacion": observacion,
             "link_publicacion": link_publicacion,
@@ -1271,16 +1361,148 @@ def marketing_queue_ui(queue_df: pd.DataFrame):
             st.error(f"No se pudo guardar el cambio: {e}")
 
 
-def historial_ui():
-    st.subheader("Historial de cambios")
+def reportes_ui(queue_df: pd.DataFrame):
+    inject_operational_css()
+
+    st.subheader("Informes")
+    st.caption("Esta sección es solo para descargar informes útiles. No es para operar productos.")
+
+    if queue_df.empty:
+        st.info("No hay datos para generar informes.")
+        return
+
+    base_cols = [
+        "SKU", "Descripcion", "Familia", "EAN", "Origen",
+        "StockSistema", "Estado", "Motivo", "Responsable",
+        "FechaUltimaGestion", "Observacion", "RelacionPackUnidad",
+        "SKURelacionadoPublicado"
+    ]
+    base_cols = [c for c in base_cols if c in queue_df.columns]
+
+    reportes = [
+        {
+            "titulo": "Productos pickeados para publicar",
+            "descripcion": "Lista que debe tomar la siguiente etapa para crear o continuar publicaciones.",
+            "estados": ["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"],
+            "archivo": "productos_pickeados_para_publicar",
+        },
+        {
+            "titulo": "Faltante físico con stock Kame",
+            "descripcion": "Productos que Kame muestra con stock, pero no fueron encontrados físicamente. Informe para bodega.",
+            "estados": ["FALTANTE FÍSICO CON STOCK KAME"],
+            "archivo": "faltante_fisico_con_stock_kame",
+        },
+        {
+            "titulo": "No publicables",
+            "descripcion": "Productos descartados por criterio del operador, con motivo escrito.",
+            "estados": ["NO PUBLICABLE"],
+            "archivo": "productos_no_publicables",
+        },
+        {
+            "titulo": "Pendientes por pickear/revisar",
+            "descripcion": "Productos que todavía deben revisarse físicamente antes de pasar a publicación.",
+            "estados": ["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"],
+            "archivo": "pendientes_por_pickear_revisar",
+        },
+        {
+            "titulo": "Sin stock Kame",
+            "descripcion": "Productos que no pasan a operación porque el sistema no muestra stock disponible.",
+            "estados": ["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"],
+            "archivo": "sin_stock_kame",
+        },
+        {
+            "titulo": "Cubiertos por pack o unidad",
+            "descripcion": "Productos que no necesariamente requieren publicación individual porque ya están cubiertos por otra publicación.",
+            "estados": ["CUBIERTO POR PACK", "CUBIERTO POR UNIDAD"],
+            "archivo": "cubiertos_por_pack_o_unidad",
+        },
+    ]
+
+    for rep in reportes:
+        df_rep = queue_df[queue_df["Estado"].isin(rep["estados"])].copy()
+        df_rep = priority_sort(df_rep) if not df_rep.empty else df_rep
+
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([3.2, 1, 1.2])
+            c1.markdown(f"### {rep['titulo']}")
+            c1.caption(rep["descripcion"])
+            c2.metric("Productos", len(df_rep))
+
+            if not df_rep.empty:
+                c3.download_button(
+                    "Descargar Excel",
+                    data=export_excel(df_rep[base_cols]),
+                    file_name=f"{rep['archivo']}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            else:
+                c3.button("Sin datos", disabled=True, use_container_width=True)
+
+            if not df_rep.empty:
+                with st.expander("Ver muestra"):
+                    st.dataframe(df_rep[base_cols].head(50), use_container_width=True, hide_index=True)
+
+
+def auditoria_ui():
+    inject_operational_css()
+
+    st.subheader("Auditoría")
+    st.caption("Aquí se revisa quién cambió cada producto, cuándo y por qué. No muestra la cola actual, solo movimientos.")
 
     try:
-        data = api_call("get_history", {"limit": 500}, timeout=60)
+        data = api_call("get_history", {"limit": 1000}, timeout=60)
         rows = data.get("historial_cambios", [])
         df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        if df.empty:
+            st.info("Todavía no hay movimientos registrados.")
+            return
+
+        c1, c2 = st.columns([1.2, 2.8])
+        accion_filter = "TODAS"
+        search = ""
+
+        if "Accion" in df.columns:
+            accion_filter = c1.selectbox(
+                "Acción",
+                ["TODAS"] + sorted(df["Accion"].fillna("").astype(str).unique().tolist()),
+                key="aud_accion",
+            )
+
+        search = c2.text_input("Buscar SKU o descripción", key="aud_busqueda")
+
+        if accion_filter != "TODAS" and "Accion" in df.columns:
+            df = df[df["Accion"].fillna("").astype(str) == accion_filter]
+
+        if search.strip():
+            s = search.strip().lower()
+            mask = pd.Series(False, index=df.index)
+
+            for col in ["SKU", "Descripcion", "Motivo", "Observacion"]:
+                if col in df.columns:
+                    mask = mask | df[col].fillna("").astype(str).str.lower().str.contains(s, na=False)
+
+            df = df[mask]
+
+        st.write(f"Movimientos encontrados: **{len(df):,}**")
+
+        if "Fecha" in df.columns:
+            df = df.sort_values("Fecha", ascending=False)
+
+        st.dataframe(df.head(500), use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "Descargar auditoría filtrada",
+            data=export_excel(df),
+            file_name=f"auditoria_movimientos_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
     except Exception as e:
-        st.error(f"No se pudo cargar historial: {e}")
+        st.error(f"No se pudo cargar auditoría: {e}")
+
 
 
 def status_ui(estado_df: pd.DataFrame, inv_df: pd.DataFrame):
@@ -1295,6 +1517,623 @@ def status_ui(estado_df: pd.DataFrame, inv_df: pd.DataFrame):
 
     st.write("Últimos estados guardados en Google Sheets:")
     st.dataframe(estado_df.tail(100), use_container_width=True, hide_index=True)
+
+
+
+# ============================================================
+# Módulo administrador
+# ============================================================
+
+def get_admin_password() -> str:
+    try:
+        return st.secrets.get("ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
+    except Exception:
+        return DEFAULT_ADMIN_PASSWORD
+
+
+def admin_login_ui() -> bool:
+    if st.session_state.get("admin_autenticado"):
+        cols = st.columns([3, 1])
+        cols[0].success("Administrador activo")
+        if cols[1].button("Cerrar sesión admin", use_container_width=True):
+            st.session_state["admin_autenticado"] = False
+            st.rerun()
+        return True
+
+    st.warning("Módulo restringido. Ingresa la clave de administrador.")
+    clave = st.text_input("Clave administrador", type="password", key="admin_password_input")
+
+    if st.button("Entrar como administrador", use_container_width=True):
+        if clave == get_admin_password():
+            st.session_state["admin_autenticado"] = True
+            st.rerun()
+        else:
+            st.error("Clave incorrecta.")
+
+    return False
+
+
+def payload_from_queue_row(
+    row: pd.Series,
+    nuevo_estado: str,
+    responsable: str,
+    motivo: str = "",
+    observacion: str = "",
+    link_publicacion: str = "",
+    accion: str = "CAMBIO ADMINISTRADOR",
+) -> dict:
+    return {
+        "fecha": now_iso(),
+        "sku": clean_sku(row.get("SKU", "")),
+        "estado": nuevo_estado,
+        "origen": row.get("Origen", ""),
+        "descripcion": row.get("Descripcion", ""),
+        "familia": row.get("Familia", ""),
+        "ean": row.get("EAN", ""),
+        "stock_anterior": float(row.get("StockAnterior", 0) or 0),
+        "stock_actual": float(row.get("StockSistema", 0) or 0),
+        "responsable": responsable.strip() or APP_USER_ADMIN,
+        "motivo": motivo,
+        "observacion": observacion,
+        "link_publicacion": link_publicacion,
+        "accion": accion,
+    }
+
+
+def payload_manual_sku(
+    sku: str,
+    nuevo_estado: str,
+    responsable: str,
+    motivo: str = "",
+    observacion: str = "",
+    link_publicacion: str = "",
+) -> dict:
+    sku = clean_sku(sku)
+    return {
+        "fecha": now_iso(),
+        "sku": sku,
+        "estado": nuevo_estado,
+        "origen": "REGISTRO MANUAL ADMIN",
+        "descripcion": "",
+        "familia": "",
+        "ean": "",
+        "stock_anterior": 0,
+        "stock_actual": 0,
+        "responsable": responsable.strip() or APP_USER_ADMIN,
+        "motivo": motivo,
+        "observacion": observacion,
+        "link_publicacion": link_publicacion,
+        "accion": "CAMBIO ADMINISTRADOR MANUAL",
+    }
+
+
+def parse_skus(text_skus: str) -> List[str]:
+    raw = re.split(r"[\n,; \t]+", str(text_skus or ""))
+    skus = []
+    seen = set()
+
+    for item in raw:
+        sku = clean_sku(item)
+
+        if sku and sku not in seen:
+            seen.add(sku)
+            skus.append(sku)
+
+    return skus
+
+
+def admin_kpis(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current_df: pd.DataFrame):
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Cola total", len(queue_df))
+    c2.metric("Estados guardados", len(estado_df))
+    c3.metric("Inventario SKUs", len(inv_current_df))
+    c4.metric("Faltante físico", int((queue_df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME").sum()) if not queue_df.empty else 0)
+    c5.metric("No publicables", int((queue_df["Estado"] == "NO PUBLICABLE").sum()) if not queue_df.empty else 0)
+
+
+def admin_filtros(queue_df: pd.DataFrame, prefix: str = "admin") -> pd.DataFrame:
+    if queue_df.empty:
+        return queue_df
+
+    c1, c2, c3 = st.columns([1.4, 1.4, 2.2])
+
+    estados = ["TODOS"] + ESTADOS
+    estado = c1.selectbox("Estado", estados, key=f"{prefix}_estado")
+
+    familias = ["TODAS"] + sorted(queue_df["Familia"].fillna("").astype(str).unique().tolist())
+    familia = c2.selectbox("Familia", familias, key=f"{prefix}_familia")
+
+    search = c3.text_input("Buscar SKU o descripción", key=f"{prefix}_buscar")
+
+    df = queue_df.copy()
+
+    if estado != "TODOS":
+        df = df[df["Estado"] == estado]
+
+    if familia != "TODAS":
+        df = df[df["Familia"] == familia]
+
+    if search.strip():
+        s = search.strip().lower()
+        df = df[
+            df["SKU"].astype(str).str.lower().str.contains(s, na=False) |
+            df["Descripcion"].astype(str).str.lower().str.contains(s, na=False)
+        ]
+
+    return priority_sort(df)
+
+
+def admin_editar_un_sku(queue_df: pd.DataFrame):
+    st.markdown("### Editar un SKU")
+    st.caption("Permite corregir un producto puntual sin buscarlo en la operación normal.")
+
+    if queue_df.empty:
+        st.info("No hay cola disponible.")
+        return
+
+    busqueda = st.text_input("Buscar SKU o descripción", key="admin_single_search")
+    responsable = APP_USER_ADMIN
+
+    df = queue_df.copy()
+
+    if busqueda.strip():
+        s = busqueda.strip().lower()
+        df = df[
+            df["SKU"].astype(str).str.lower().str.contains(s, na=False) |
+            df["Descripcion"].astype(str).str.lower().str.contains(s, na=False)
+        ]
+
+    df = priority_sort(df)
+
+    if df.empty:
+        st.info("No hay resultados.")
+        return
+
+    opciones = [
+        f"{row['SKU']} | {row['Descripcion']} | {row['Estado']}"
+        for _, row in df.head(300).iterrows()
+    ]
+
+    seleccionado = st.selectbox("Producto", opciones, key="admin_single_producto")
+    sku = seleccionado.split("|")[0].strip()
+    row = df[df["SKU"].astype(str) == sku].iloc[0]
+
+    with st.container(border=True):
+        st.write(f"**SKU:** `{row.get('SKU', '')}`")
+        st.write(f"**Descripción:** {row.get('Descripcion', '')}")
+        st.write(f"**Estado actual:** {row.get('Estado', '')}")
+        st.write(f"**Stock Kame:** {row.get('StockSistema', 0)}")
+        st.write(f"**Familia:** {row.get('Familia', '')}")
+
+    c3, c4 = st.columns(2)
+    nuevo_estado = c3.selectbox(
+        "Nuevo estado",
+        ESTADOS,
+        index=ESTADOS.index(row.get("Estado", "")) if row.get("Estado", "") in ESTADOS else 0,
+        key="admin_single_estado",
+    )
+    link_publicacion = c4.text_input(
+        "Link publicación ML",
+        value=str(row.get("LinkPublicacion", "") or ""),
+        key="admin_single_link",
+    )
+
+    motivo = st.text_area(
+        "Motivo del cambio",
+        key="admin_single_motivo",
+        placeholder="Ejemplo: corrección manual, duplicado, publicado por operador, error de estado, etc.",
+        height=80,
+    )
+    observacion = st.text_area(
+        "Observación interna",
+        key="admin_single_obs",
+        placeholder="Opcional",
+        height=80,
+    )
+
+    if st.button("Guardar cambio administrador", use_container_width=True):
+        if nuevo_estado == "NO PUBLICABLE" and not motivo.strip():
+            st.error("Para NO PUBLICABLE debes escribir el motivo.")
+        else:
+            try:
+                payload = payload_from_queue_row(
+                    row,
+                    nuevo_estado,
+                    responsable,
+                    motivo.strip() or "Cambio administrador",
+                    observacion.strip(),
+                    link_publicacion.strip(),
+                )
+                api_upsert_product(payload)
+                st.success(f"SKU {sku} actualizado a {nuevo_estado}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo guardar el cambio: {e}")
+
+
+def admin_cambios_masivos(queue_df: pd.DataFrame):
+    st.markdown("### Cambios masivos por SKU")
+    st.caption("Pega una lista de SKUs y cambia su estado en bloque. Los SKUs no encontrados se reportan y no se modifican.")
+
+    c1, c2 = st.columns([2, 1])
+    skus_text = c1.text_area(
+        "SKUs a modificar",
+        key="admin_bulk_skus",
+        placeholder="Pega SKUs separados por salto de línea, coma o espacio.",
+        height=160,
+    )
+    responsable = APP_USER_ADMIN
+    nuevo_estado = c2.selectbox("Nuevo estado masivo", ESTADOS, key="admin_bulk_estado")
+
+    motivo = st.text_area(
+        "Motivo del cambio masivo",
+        key="admin_bulk_motivo",
+        placeholder="Obligatorio para NO PUBLICABLE. Recomendado para todos los cambios masivos.",
+        height=80,
+    )
+    observacion = st.text_area(
+        "Observación masiva",
+        key="admin_bulk_obs",
+        placeholder="Opcional",
+        height=80,
+    )
+
+    skus = parse_skus(skus_text)
+    st.write(f"SKUs detectados: **{len(skus):,}**")
+
+    if skus:
+        queue_map = {clean_sku(r["SKU"]): r for _, r in queue_df.iterrows()}
+        encontrados = [sku for sku in skus if sku in queue_map]
+        no_encontrados = [sku for sku in skus if sku not in queue_map]
+
+        c3, c4 = st.columns(2)
+        c3.metric("Encontrados", len(encontrados))
+        c4.metric("No encontrados", len(no_encontrados))
+
+        if no_encontrados:
+            with st.expander("Ver SKUs no encontrados"):
+                st.code("\n".join(no_encontrados))
+
+    confirmar = st.checkbox(
+        "Confirmo que quiero aplicar este cambio masivo",
+        key="admin_bulk_confirm",
+    )
+
+    if st.button("Aplicar cambio masivo", use_container_width=True):
+        if not skus:
+            st.error("Pega al menos un SKU.")
+        elif nuevo_estado == "NO PUBLICABLE" and not motivo.strip():
+            st.error("Para NO PUBLICABLE debes escribir el motivo.")
+        elif not confirmar:
+            st.error("Marca la confirmación antes de aplicar el cambio masivo.")
+        else:
+            try:
+                queue_map = {clean_sku(r["SKU"]): r for _, r in queue_df.iterrows()}
+                items = []
+
+                for sku in skus:
+                    if sku not in queue_map:
+                        continue
+
+                    items.append(
+                        payload_from_queue_row(
+                            queue_map[sku],
+                            nuevo_estado,
+                            responsable,
+                            motivo.strip() or "Cambio masivo administrador",
+                            observacion.strip(),
+                            "",
+                            accion="CAMBIO MASIVO ADMINISTRADOR",
+                        )
+                    )
+
+                if not items:
+                    st.error("Ningún SKU fue encontrado en la cola actual.")
+                else:
+                    api_bulk_upsert_products(items, chunk_size=250)
+                    st.success(f"Cambio masivo aplicado a {len(items):,} SKUs.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo aplicar el cambio masivo: {e}")
+
+
+def admin_crear_o_forzar_sku():
+    st.markdown("### Crear o forzar estado de SKU manual")
+    st.caption("Úsalo solo cuando el SKU no aparece en la cola, pero necesitas dejar un estado guardado en la base central.")
+
+    c1, c2 = st.columns([1.2, 1.3])
+    sku = c1.text_input("SKU", key="admin_manual_sku")
+    nuevo_estado = c2.selectbox("Estado", ESTADOS, key="admin_manual_estado")
+    responsable = APP_USER_ADMIN
+
+    motivo = st.text_area("Motivo", key="admin_manual_motivo", height=80)
+    observacion = st.text_area("Observación", key="admin_manual_obs", height=80)
+    link_publicacion = st.text_input("Link publicación ML", key="admin_manual_link")
+
+    if st.button("Guardar SKU manual", use_container_width=True):
+        if not clean_sku(sku):
+            st.error("Indica SKU.")
+        elif nuevo_estado == "NO PUBLICABLE" and not motivo.strip():
+            st.error("Para NO PUBLICABLE debes escribir el motivo.")
+        else:
+            try:
+                payload = payload_manual_sku(
+                    sku,
+                    nuevo_estado,
+                    responsable,
+                    motivo.strip() or "Registro manual administrador",
+                    observacion.strip(),
+                    link_publicacion.strip(),
+                )
+                api_upsert_product(payload)
+                st.success(f"SKU {clean_sku(sku)} guardado manualmente como {nuevo_estado}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo guardar SKU manual: {e}")
+
+
+def admin_descargas(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current_df: pd.DataFrame):
+    st.markdown("### Descargas administrativas")
+    st.caption("Bases completas para respaldo, revisión o corrección externa.")
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.download_button(
+        "Descargar cola completa",
+        data=export_excel(queue_df),
+        file_name=f"admin_cola_completa_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        disabled=queue_df.empty,
+    )
+
+    c2.download_button(
+        "Descargar estados guardados",
+        data=export_excel(estado_df),
+        file_name=f"admin_estado_actual_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        disabled=estado_df.empty,
+    )
+
+    c3.download_button(
+        "Descargar inventario central",
+        data=export_excel(inv_current_df),
+        file_name=f"admin_inventario_actual_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        disabled=inv_current_df.empty,
+    )
+
+    st.divider()
+
+    df_admin = admin_filtros(queue_df, prefix="admin_download")
+    st.write(f"Registros filtrados: **{len(df_admin):,}**")
+    st.dataframe(df_admin.head(500), use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Descargar vista filtrada",
+        data=export_excel(df_admin),
+        file_name=f"admin_vista_filtrada_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        disabled=df_admin.empty,
+    )
+
+
+
+def admin_informes_personalizados(queue_df: pd.DataFrame):
+    st.markdown("### Informes administrativos por estado y motivo")
+    st.caption(
+        "Genera informes filtrados para los estados críticos: No publicable, Faltante físico, Pickeado para publicar, Publicado y Sin stock."
+    )
+
+    if queue_df.empty:
+        st.info("No hay datos disponibles para generar informes.")
+        return
+
+    estados_informe = {
+        "NO PUBLICABLE": ["NO PUBLICABLE"],
+        "FALTANTE FÍSICO CON STOCK KAME": ["FALTANTE FÍSICO CON STOCK KAME"],
+        "PICKEADO PARA PUBLICAR": ["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"],
+        "PUBLICADO": ["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"],
+        "SIN STOCK": ["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"],
+    }
+
+    base_cols = [
+        "SKU",
+        "Descripcion",
+        "Familia",
+        "EAN",
+        "Origen",
+        "StockSistema",
+        "Estado",
+        "Motivo",
+        "Observacion",
+        "FechaUltimaGestion",
+        "RelacionPackUnidad",
+        "SKURelacionadoPublicado",
+        "LinkPublicacion",
+    ]
+    base_cols = [c for c in base_cols if c in queue_df.columns]
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("No publicable", int((queue_df["Estado"] == "NO PUBLICABLE").sum()))
+    k2.metric("Faltante físico", int((queue_df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME").sum()))
+    k3.metric("Pickeado", int((queue_df["Estado"].isin(["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"])).sum()))
+    k4.metric("Publicado", int((queue_df["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"])).sum()))
+    k5.metric("Sin stock", int((queue_df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])).sum()))
+
+    st.divider()
+
+    c1, c2, c3, c4 = st.columns([1.4, 1.6, 1.4, 2.2])
+
+    tipo_informe = c1.selectbox(
+        "Tipo de informe",
+        list(estados_informe.keys()),
+        key="admin_report_tipo",
+    )
+
+    df = queue_df[queue_df["Estado"].isin(estados_informe[tipo_informe])].copy()
+
+    motivos = ["TODOS"]
+    if "Motivo" in df.columns and not df.empty:
+        motivos += sorted([m for m in df["Motivo"].fillna("").astype(str).unique().tolist() if m.strip()])
+
+    motivo = c2.selectbox("Motivo", motivos, key="admin_report_motivo")
+
+    familias = ["TODAS"]
+    if "Familia" in df.columns and not df.empty:
+        familias += sorted([f for f in df["Familia"].fillna("").astype(str).unique().tolist() if f.strip()])
+
+    familia = c3.selectbox("Familia", familias, key="admin_report_familia")
+    search = c4.text_input("Buscar SKU o descripción", key="admin_report_search")
+
+    orden = st.selectbox(
+        "Ordenar por",
+        ["Más reciente", "Mayor stock Kame", "Familia", "SKU"],
+        key="admin_report_orden",
+    )
+
+    if motivo != "TODOS" and "Motivo" in df.columns:
+        df = df[df["Motivo"].fillna("").astype(str) == motivo]
+
+    if familia != "TODAS" and "Familia" in df.columns:
+        df = df[df["Familia"].fillna("").astype(str) == familia]
+
+    if search.strip():
+        s = search.strip().lower()
+        mask = pd.Series(False, index=df.index)
+        for col in ["SKU", "Descripcion", "Motivo", "Observacion"]:
+            if col in df.columns:
+                mask = mask | df[col].fillna("").astype(str).str.lower().str.contains(s, na=False)
+        df = df[mask]
+
+    if not df.empty:
+        if orden == "Más reciente" and "FechaUltimaGestion" in df.columns:
+            df = df.sort_values("FechaUltimaGestion", ascending=False)
+        elif orden == "Mayor stock Kame" and "StockSistema" in df.columns:
+            df = df.sort_values("StockSistema", ascending=False)
+        elif orden == "Familia" and "Familia" in df.columns:
+            df = df.sort_values(["Familia", "Descripcion"], ascending=True)
+        elif orden == "SKU" and "SKU" in df.columns:
+            df = df.sort_values("SKU", ascending=True)
+
+    st.write(f"Registros del informe: **{len(df):,}**")
+
+    if df.empty:
+        st.info("No hay registros con los filtros seleccionados.")
+        return
+
+    resumen_cols = []
+    if "Estado" in df.columns:
+        resumen_cols.append("Estado")
+    if "Motivo" in df.columns:
+        resumen_cols.append("Motivo")
+
+    if resumen_cols:
+        with st.expander("Resumen agrupado", expanded=True):
+            resumen = (
+                df.groupby(resumen_cols, dropna=False)
+                .size()
+                .reset_index(name="Cantidad")
+                .sort_values("Cantidad", ascending=False)
+            )
+            st.dataframe(resumen, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "Descargar resumen agrupado",
+                data=export_excel(resumen),
+                file_name=f"resumen_{tipo_informe.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+    st.dataframe(df[base_cols].head(1000), use_container_width=True, hide_index=True)
+
+    nombre_base = tipo_informe.lower()
+    nombre_base = (
+        nombre_base.replace(" ", "_")
+        .replace("í", "i")
+        .replace("í", "i")
+        .replace("é", "e")
+        .replace("ó", "o")
+        .replace("ú", "u")
+        .replace("á", "a")
+        .replace("/", "_")
+    )
+
+    st.download_button(
+        "Descargar informe detallado",
+        data=export_excel(df[base_cols]),
+        file_name=f"informe_{nombre_base}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    st.divider()
+
+    st.markdown("#### Descarga rápida por cada estado")
+    st.caption("Botones directos para bajar cada informe sin cambiar filtros.")
+
+    quick_cols = st.columns(5)
+
+    for i, (nombre, estados) in enumerate(estados_informe.items()):
+        df_quick = queue_df[queue_df["Estado"].isin(estados)].copy()
+        file_name = (
+            nombre.lower()
+            .replace(" ", "_")
+            .replace("í", "i")
+            .replace("é", "e")
+            .replace("ó", "o")
+            .replace("ú", "u")
+            .replace("á", "a")
+        )
+
+        quick_cols[i].download_button(
+            f"{nombre} ({len(df_quick):,})",
+            data=export_excel(df_quick[base_cols]) if not df_quick.empty else export_excel(pd.DataFrame(columns=base_cols)),
+            file_name=f"informe_{file_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            disabled=df_quick.empty,
+        )
+
+
+def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current_df: pd.DataFrame):
+    inject_operational_css()
+
+    st.subheader("Administrador")
+    st.caption("Módulo de superusuario para corregir estados, hacer cambios masivos y descargar bases.")
+
+    if not admin_login_ui():
+        st.info("Configura `ADMIN_PASSWORD` en los Secrets de Streamlit para cambiar la clave por defecto.")
+        return
+
+    admin_kpis(queue_df, estado_df, inv_current_df)
+
+    tabs_admin = st.tabs([
+        "Editar SKU",
+        "Cambios masivos",
+        "Forzar SKU manual",
+        "Informes admin",
+        "Descargas",
+    ])
+
+    with tabs_admin[0]:
+        admin_editar_un_sku(queue_df)
+
+    with tabs_admin[1]:
+        admin_cambios_masivos(queue_df)
+
+    with tabs_admin[2]:
+        admin_crear_o_forzar_sku()
+
+    with tabs_admin[3]:
+        admin_informes_personalizados(queue_df)
+
+    with tabs_admin[4]:
+        admin_descargas(queue_df, estado_df, inv_current_df)
 
 
 def main():
@@ -1338,37 +2177,19 @@ def main():
         estado_api_df=estado_df,
     )
 
-    tabs = st.tabs(["Operar productos", "Resumen", "Cola completa", "Historial", "Base central"])
+    tabs = st.tabs(["Operar productos", "Informes", "Auditoría", "Administrador"])
 
     with tabs[0]:
         operar_productos_ui(queue_df)
 
     with tabs[1]:
-        dashboard(queue_df)
-        st.divider()
-        st.subheader("Pendientes por pickear/revisar")
-
-        if not queue_df.empty:
-            preview = queue_df[queue_df["Estado"].isin([
-                "LLEGÓ STOCK",
-                "PRODUCTO NUEVO CON STOCK",
-                "PENDIENTE PUBLICAR",
-                "PICKEADO PARA PUBLICAR",
-                "EN PROCESO DE PUBLICACIÓN",
-            ])].copy()
-            preview = priority_sort(preview)
-            st.dataframe(preview.head(100), use_container_width=True, hide_index=True)
-        else:
-            st.info("Carga el inventario desde la barra lateral para comenzar.")
+        reportes_ui(queue_df)
 
     with tabs[2]:
-        marketing_queue_ui(queue_df)
+        auditoria_ui()
 
     with tabs[3]:
-        historial_ui()
-
-    with tabs[4]:
-        status_ui(estado_df, inv_current_df)
+        administrador_ui(queue_df, estado_df, inv_current_df)
 
 
 if __name__ == "__main__":
