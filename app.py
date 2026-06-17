@@ -1,16 +1,18 @@
 import json
+import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 
 import pandas as pd
 import requests
 import streamlit as st
 
-
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.9.1 - fix import sync"
+APP_VERSION = "V6.9.2 - fix imports background"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -282,7 +284,6 @@ def safe_file_exists(path: Path) -> bool:
 
 
 def export_excel(df: pd.DataFrame) -> bytes:
-    from io import BytesIO
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="cola_marketing")
