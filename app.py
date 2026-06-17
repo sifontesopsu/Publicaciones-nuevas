@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.3 - sin responsable visible"
+APP_VERSION = "V6.4 - fix botones informes"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -1435,9 +1435,15 @@ def reportes_ui(queue_df: pd.DataFrame):
                     file_name=f"{rep['archivo']}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
+                    key=f"reporte_descargar_{rep['archivo']}",
                 )
             else:
-                c3.button("Sin datos", disabled=True, use_container_width=True)
+                c3.button(
+                    "Sin datos",
+                    disabled=True,
+                    use_container_width=True,
+                    key=f"reporte_sin_datos_{rep['archivo']}",
+                )
 
             if not df_rep.empty:
                 with st.expander("Ver muestra"):
@@ -1885,6 +1891,7 @@ def admin_descargas(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         disabled=queue_df.empty,
+        key="admin_download_cola_completa",
     )
 
     c2.download_button(
@@ -1894,6 +1901,7 @@ def admin_descargas(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         disabled=estado_df.empty,
+        key="admin_download_estado_actual",
     )
 
     c3.download_button(
@@ -1903,6 +1911,7 @@ def admin_descargas(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         disabled=inv_current_df.empty,
+        key="admin_download_inventario_actual",
     )
 
     st.divider()
@@ -1918,6 +1927,7 @@ def admin_descargas(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         disabled=df_admin.empty,
+        key="admin_download_vista_filtrada",
     )
 
 
@@ -2047,6 +2057,7 @@ def admin_informes_personalizados(queue_df: pd.DataFrame):
                 file_name=f"resumen_{tipo_informe.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
+                key=f"admin_resumen_agrupado_{tipo_informe}",
             )
 
     st.dataframe(df[base_cols].head(1000), use_container_width=True, hide_index=True)
@@ -2069,6 +2080,7 @@ def admin_informes_personalizados(queue_df: pd.DataFrame):
         file_name=f"informe_{nombre_base}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
+        key=f"admin_informe_detallado_{tipo_informe}",
     )
 
     st.divider()
@@ -2097,6 +2109,7 @@ def admin_informes_personalizados(queue_df: pd.DataFrame):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             disabled=df_quick.empty,
+            key=f"admin_quick_download_{file_name}",
         )
 
 
