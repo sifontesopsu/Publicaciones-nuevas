@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import requests
@@ -9,7 +10,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.9 - sync segundo plano"
+APP_VERSION = "V6.9.1 - fix import sync"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
