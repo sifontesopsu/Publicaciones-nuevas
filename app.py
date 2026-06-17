@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.9.2 - fix imports background"
+APP_VERSION = "V6.9.3 - fix caja vacía tarjetas"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -1429,8 +1429,6 @@ def operar_productos_ui(queue_df: pd.DataFrame):
         relacion = str(row.get("RelacionPackUnidad", "") or "")
         relacionado = str(row.get("SKURelacionadoPublicado", "") or "")
 
-        st.markdown('<div class="aurora-card">', unsafe_allow_html=True)
-
         top_left, top_mid, top_right = st.columns([1.3, 4.7, 1.7])
         with top_left:
             st.markdown(f'<div class="aurora-sku">SKU: <code>{sku}</code></div>', unsafe_allow_html=True)
@@ -1500,7 +1498,6 @@ def operar_productos_ui(queue_df: pd.DataFrame):
             st.caption("Esta cola es solo de consulta. Para correcciones usa el módulo Administrador.")
 
         if st.session_state.get("no_publicable_sku_abierto") == sku:
-            st.markdown('<div class="section-soft">', unsafe_allow_html=True)
             st.warning("Selecciona el motivo. La lista es cerrada para mantener los informes ordenados.")
 
             motivo_categoria = st.selectbox(
@@ -1524,11 +1521,7 @@ def operar_productos_ui(queue_df: pd.DataFrame):
                 st.session_state["no_publicable_sku_abierto"] = ""
                 st.rerun()
 
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
-
+    
 def marketing_queue_ui(queue_df: pd.DataFrame):
     st.subheader("Cola de Marketing")
 
