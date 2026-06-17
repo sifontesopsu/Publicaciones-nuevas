@@ -9,7 +9,7 @@ import streamlit as st
 
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.5 - acciones por etapa"
+APP_VERSION = "V6.7 - motivos cerrados no publicable"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -62,30 +62,23 @@ ESTADOS_MANUALES_PROTEGIDOS = {
 }
 
 MOTIVOS_NO_PUBLICABLE = [
-    "",
-    "SKU duplicado / ya publicado",
-    "Producto ya cubierto por pack",
-    "Producto ya cubierto por unidad",
-    "No corresponde publicar individual",
+    "Producto duplicado / ya publicado",
+    "Producto cubierto por pack",
     "Producto descontinuado",
-    "Producto de baja rotación",
     "Margen insuficiente / no rentable",
-    "Precio no competitivo",
-    "Producto solo para venta presencial",
-    "Producto a pedido / stock no estable",
+    "Producto a pedido / stock inestable",
     "Producto frágil o riesgoso para despacho",
-    "Producto con peso o medidas problemáticas",
+    "Peso o medidas problemáticas",
     "Producto incompleto",
     "Producto dañado",
     "Producto no identificado",
-    "EAN incorrecto o inválido",
-    "Datos del maestro incorrectos",
-    "Categoría Mercado Libre no conveniente",
     "Producto restringido por Mercado Libre",
-    "Marca/modelo no autorizado",
-    "Relación pack/unidad incorrecta",
+    "Marca/modelo fuera de norma",
     "Otro",
 ]
+
+MOTIVOS_NO_PUBLICABLE_OPERATIVO = MOTIVOS_NO_PUBLICABLE
+
 
 MOTIVOS_GENERALES = [
     "",
@@ -1245,29 +1238,29 @@ def operar_productos_ui(queue_df: pd.DataFrame):
 
         if st.session_state.get("no_publicable_sku_abierto") == sku:
             st.markdown('<div class="section-soft">', unsafe_allow_html=True)
-            st.warning("Escribe el motivo. Este motivo queda para auditoría y para no volver a revisar el mismo SKU.")
-            motivo_np = st.text_area(
+            st.warning("Selecciona el motivo. La lista es cerrada para mantener los informes ordenados.")
+
+            motivo_categoria = st.selectbox(
                 "Motivo no publicable",
-                key=f"motivo_np_libre_{sku}_{idx}",
-                placeholder="Ejemplo: producto descontinuado, no rentable, duplicado, no corresponde vender individual, etc.",
-                height=90,
+                MOTIVOS_NO_PUBLICABLE,
+                key=f"motivo_np_categoria_{sku}_{idx}",
             )
+
             csave, ccancel = st.columns(2)
+
             if csave.button("Confirmar no publicable", key=f"confirmar_nopub_{sku}_{idx}", use_container_width=True):
-                if not motivo_np.strip():
-                    st.error("Escribe el motivo antes de confirmar.")
-                else:
-                    try:
-                        save_status_change(row, "NO PUBLICABLE", responsable, motivo_np.strip(), "", "")
-                        st.session_state["no_publicable_sku_abierto"] = ""
-                        st.success(f"{sku} marcado como NO PUBLICABLE")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"No se pudo guardar: {e}")
+                try:
+                    save_status_change(row, "NO PUBLICABLE", responsable, motivo_categoria, "", "")
+                    st.session_state["no_publicable_sku_abierto"] = ""
+                    st.success(f"{sku} marcado como NO PUBLICABLE")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
 
             if ccancel.button("Cancelar", key=f"cancelar_nopub_{sku}_{idx}", use_container_width=True):
                 st.session_state["no_publicable_sku_abierto"] = ""
                 st.rerun()
+
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1747,37 +1740,34 @@ def admin_editar_un_sku(queue_df: pd.DataFrame):
         key="admin_single_link",
     )
 
-    motivo = st.text_area(
-        "Motivo del cambio",
-        key="admin_single_motivo",
-        placeholder="Ejemplo: corrección manual, duplicado, publicado por operador, error de estado, etc.",
-        height=80,
-    )
-    observacion = st.text_area(
-        "Observación interna",
-        key="admin_single_obs",
-        placeholder="Opcional",
-        height=80,
-    )
+    if nuevo_estado == "NO PUBLICABLE":
+        motivo = st.selectbox(
+            "Motivo no publicable",
+            MOTIVOS_NO_PUBLICABLE,
+            key="admin_single_motivo_np",
+        )
+    else:
+        motivo = st.selectbox(
+            "Motivo del cambio",
+            MOTIVOS_GENERALES,
+            key="admin_single_motivo_general",
+        )
 
     if st.button("Guardar cambio administrador", use_container_width=True):
-        if nuevo_estado == "NO PUBLICABLE" and not motivo.strip():
-            st.error("Para NO PUBLICABLE debes escribir el motivo.")
-        else:
-            try:
-                payload = payload_from_queue_row(
-                    row,
-                    nuevo_estado,
-                    responsable,
-                    motivo.strip() or "Cambio administrador",
-                    observacion.strip(),
-                    link_publicacion.strip(),
-                )
-                api_upsert_product(payload)
-                st.success(f"SKU {sku} actualizado a {nuevo_estado}.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo guardar el cambio: {e}")
+        try:
+            payload = payload_from_queue_row(
+                row,
+                nuevo_estado,
+                responsable,
+                motivo or "Cambio administrador",
+                "",
+                link_publicacion.strip(),
+            )
+            api_upsert_product(payload)
+            st.success(f"SKU {sku} actualizado a {nuevo_estado}.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"No se pudo guardar el cambio: {e}")
 
 
 def admin_cambios_masivos(queue_df: pd.DataFrame):
@@ -1794,18 +1784,20 @@ def admin_cambios_masivos(queue_df: pd.DataFrame):
     responsable = APP_USER_ADMIN
     nuevo_estado = c2.selectbox("Nuevo estado masivo", ESTADOS, key="admin_bulk_estado")
 
-    motivo = st.text_area(
-        "Motivo del cambio masivo",
-        key="admin_bulk_motivo",
-        placeholder="Obligatorio para NO PUBLICABLE. Recomendado para todos los cambios masivos.",
-        height=80,
-    )
-    observacion = st.text_area(
-        "Observación masiva",
-        key="admin_bulk_obs",
-        placeholder="Opcional",
-        height=80,
-    )
+    if nuevo_estado == "NO PUBLICABLE":
+        motivo = st.selectbox(
+            "Motivo no publicable",
+            MOTIVOS_NO_PUBLICABLE,
+            key="admin_bulk_motivo_np",
+        )
+    else:
+        motivo = st.selectbox(
+            "Motivo del cambio masivo",
+            MOTIVOS_GENERALES,
+            key="admin_bulk_motivo_general",
+        )
+
+    observacion = ""
 
     skus = parse_skus(skus_text)
     st.write(f"SKUs detectados: **{len(skus):,}**")
@@ -1831,8 +1823,6 @@ def admin_cambios_masivos(queue_df: pd.DataFrame):
     if st.button("Aplicar cambio masivo", use_container_width=True):
         if not skus:
             st.error("Pega al menos un SKU.")
-        elif nuevo_estado == "NO PUBLICABLE" and not motivo.strip():
-            st.error("Para NO PUBLICABLE debes escribir el motivo.")
         elif not confirmar:
             st.error("Marca la confirmación antes de aplicar el cambio masivo.")
         else:
@@ -1849,8 +1839,8 @@ def admin_cambios_masivos(queue_df: pd.DataFrame):
                             queue_map[sku],
                             nuevo_estado,
                             responsable,
-                            motivo.strip() or "Cambio masivo administrador",
-                            observacion.strip(),
+                            motivo or "Cambio masivo administrador",
+                            observacion,
                             "",
                             accion="CAMBIO MASIVO ADMINISTRADOR",
                         )
@@ -1875,23 +1865,32 @@ def admin_crear_o_forzar_sku():
     nuevo_estado = c2.selectbox("Estado", ESTADOS, key="admin_manual_estado")
     responsable = APP_USER_ADMIN
 
-    motivo = st.text_area("Motivo", key="admin_manual_motivo", height=80)
-    observacion = st.text_area("Observación", key="admin_manual_obs", height=80)
+    if nuevo_estado == "NO PUBLICABLE":
+        motivo = st.selectbox(
+            "Motivo no publicable",
+            MOTIVOS_NO_PUBLICABLE,
+            key="admin_manual_motivo_np",
+        )
+    else:
+        motivo = st.selectbox(
+            "Motivo",
+            MOTIVOS_GENERALES,
+            key="admin_manual_motivo_general",
+        )
+
     link_publicacion = st.text_input("Link publicación ML", key="admin_manual_link")
 
     if st.button("Guardar SKU manual", use_container_width=True):
         if not clean_sku(sku):
             st.error("Indica SKU.")
-        elif nuevo_estado == "NO PUBLICABLE" and not motivo.strip():
-            st.error("Para NO PUBLICABLE debes escribir el motivo.")
         else:
             try:
                 payload = payload_manual_sku(
                     sku,
                     nuevo_estado,
                     responsable,
-                    motivo.strip() or "Registro manual administrador",
-                    observacion.strip(),
+                    motivo or "Registro manual administrador",
+                    "",
                     link_publicacion.strip(),
                 )
                 api_upsert_product(payload)
