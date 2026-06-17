@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.9.3 - fix caja vacía tarjetas"
+APP_VERSION = "V6.9.5 - admin sin clave"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -25,7 +25,6 @@ PACKS_FILE = DATA_DIR / "packs.xlsx"
 # En Streamlit Cloud puedes sobrescribirla desde Secrets si cambia el despliegue.
 DEFAULT_APP_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw8k8UkeHtHdAcAFUKvBtHfELH7byRdM0hXao5-OjqeCbI1KL3JxaQfFebgq7_4fzoy/exec"
 DEFAULT_APP_SCRIPT_TOKEN = "aurora_publicaciones_2026"
-DEFAULT_ADMIN_PASSWORD = "aurora_admin_2026"
 APP_USER_OPERACION = "OPERACION"
 APP_USER_ADMIN = "ADMINISTRADOR"
 APP_USER_SISTEMA = "SISTEMA"
@@ -41,8 +40,9 @@ INVENTARIO_API_COLUMNS = [
     "costo_promedio", "saldo_valor", "fecha_carga"
 ]
 
-SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=3)
-SYNC_LOCK = threading.Lock()
+@st.cache_resource
+def get_sync_executor():
+    return ThreadPoolExecutor(max_workers=3)
 
 
 ESTADOS = [
@@ -468,6 +468,90 @@ def replace_inventory_worker(payload: dict):
     api_call("replace_inventory", payload, timeout=240)
 
 
+def init_sync_state():
+    if "sync_jobs" not in st.session_state:
+        st.session_state["sync_jobs"] = []
+    if "sync_ok_count" not in st.session_state:
+        st.session_state["sync_ok_count"] = 0
+    if "sync_error_count" not in st.session_state:
+        st.session_state["sync_error_count"] = 0
+    if "sync_errors" not in st.session_state:
+        st.session_state["sync_errors"] = []
+    if "sync_last_ok" not in st.session_state:
+        st.session_state["sync_last_ok"] = ""
+
+
+def enqueue_sync_job(tipo: str, future, referencia: str = "", cantidad: int = 1):
+    """
+    Guarda el future en session_state, pero NO toca session_state desde el hilo.
+    Streamlit revisa estos futures desde el hilo principal con check_sync_jobs().
+    """
+    init_sync_state()
+    jobs = st.session_state.get("sync_jobs", [])
+    jobs.append({
+        "id": f"{tipo}_{referencia}_{datetime.now().timestamp()}",
+        "tipo": tipo,
+        "referencia": referencia,
+        "cantidad": cantidad,
+        "creado": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "future": future,
+    })
+    st.session_state["sync_jobs"] = jobs
+
+
+def check_sync_jobs():
+    """
+    Revisa trabajos en segundo plano desde el hilo principal de Streamlit.
+    Esto evita modificar st.session_state dentro de callbacks externos.
+    """
+    init_sync_state()
+    jobs = st.session_state.get("sync_jobs", [])
+    if not jobs:
+        return
+
+    pending = []
+    ok_count = 0
+    errors = []
+
+    for job in jobs:
+        future = job.get("future")
+
+        if future is None:
+            continue
+
+        if future.done():
+            try:
+                future.result()
+                ok_count += 1
+            except Exception as e:
+                errors.append({
+                    "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "tipo": job.get("tipo", ""),
+                    "referencia": job.get("referencia", ""),
+                    "error": str(e),
+                })
+        else:
+            pending.append(job)
+
+    if ok_count:
+        st.session_state["sync_ok_count"] = st.session_state.get("sync_ok_count", 0) + ok_count
+        st.session_state["sync_last_ok"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if errors:
+        st.session_state["sync_error_count"] = st.session_state.get("sync_error_count", 0) + len(errors)
+        current_errors = st.session_state.get("sync_errors", [])
+        current_errors.extend(errors)
+        st.session_state["sync_errors"] = current_errors[-30:]
+
+    st.session_state["sync_jobs"] = pending
+
+
+def get_pending_sync_count() -> int:
+    init_sync_state()
+    check_sync_jobs()
+    return len(st.session_state.get("sync_jobs", []))
+
+
 def api_replace_inventory(
     inv_df: pd.DataFrame,
     usuario: str,
@@ -502,64 +586,8 @@ def api_replace_inventory(
         api_call("replace_inventory", payload, timeout=240)
         return
 
-    init_sync_state()
-    sync_status_increment_pending(1)
-
-    future = SYNC_EXECUTOR.submit(replace_inventory_worker, payload)
-
-    def _done_callback(fut):
-        try:
-            fut.result()
-            sync_status_mark_ok(1)
-        except Exception as e:
-            sync_status_mark_error(e, 1)
-
-    future.add_done_callback(_done_callback)
-
-
-def init_sync_state():
-    if "sync_pending_count" not in st.session_state:
-        st.session_state["sync_pending_count"] = 0
-    if "sync_ok_count" not in st.session_state:
-        st.session_state["sync_ok_count"] = 0
-    if "sync_error_count" not in st.session_state:
-        st.session_state["sync_error_count"] = 0
-    if "sync_errors" not in st.session_state:
-        st.session_state["sync_errors"] = []
-    if "sync_last_ok" not in st.session_state:
-        st.session_state["sync_last_ok"] = ""
-
-
-def sync_status_increment_pending(amount: int = 1):
-    init_sync_state()
-    st.session_state["sync_pending_count"] += amount
-
-
-def sync_status_mark_ok(amount: int = 1):
-    with SYNC_LOCK:
-        # Los callbacks pueden ejecutarse fuera del flujo normal de Streamlit.
-        # Por eso esta función solo se usa cuando el estado de sesión está disponible.
-        try:
-            st.session_state["sync_pending_count"] = max(0, st.session_state.get("sync_pending_count", 0) - amount)
-            st.session_state["sync_ok_count"] = st.session_state.get("sync_ok_count", 0) + amount
-            st.session_state["sync_last_ok"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            pass
-
-
-def sync_status_mark_error(error_message: str, amount: int = 1):
-    with SYNC_LOCK:
-        try:
-            st.session_state["sync_pending_count"] = max(0, st.session_state.get("sync_pending_count", 0) - amount)
-            st.session_state["sync_error_count"] = st.session_state.get("sync_error_count", 0) + amount
-            errors = st.session_state.get("sync_errors", [])
-            errors.append({
-                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "error": str(error_message),
-            })
-            st.session_state["sync_errors"] = errors[-20:]
-        except Exception:
-            pass
+    future = get_sync_executor().submit(replace_inventory_worker, payload)
+    enqueue_sync_job("inventario", future, "LibroInventario", 1)
 
 
 def sync_upsert_worker(payload: dict):
@@ -582,7 +610,8 @@ def api_upsert_product(payload: dict, background: bool = True) -> None:
     Guarda un cambio individual.
     En modo background:
     - actualiza la memoria local al instante,
-    - envía a Google Sheets en segundo plano.
+    - envía a Google Sheets en segundo plano,
+    - NO modifica st.session_state desde el hilo externo.
     """
     update_estado_cache_from_payload(payload)
 
@@ -590,19 +619,8 @@ def api_upsert_product(payload: dict, background: bool = True) -> None:
         api_call("upsert_product", payload, timeout=90)
         return
 
-    init_sync_state()
-    sync_status_increment_pending(1)
-
-    future = SYNC_EXECUTOR.submit(sync_upsert_worker, payload)
-
-    def _done_callback(fut):
-        try:
-            fut.result()
-            sync_status_mark_ok(1)
-        except Exception as e:
-            sync_status_mark_error(e, 1)
-
-    future.add_done_callback(_done_callback)
+    future = get_sync_executor().submit(sync_upsert_worker, payload)
+    enqueue_sync_job("cambio_sku", future, clean_sku(payload.get("sku", "")), 1)
 
 
 def chunk_list(items: List[dict], chunk_size: int) -> List[List[dict]]:
@@ -614,7 +632,8 @@ def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250, backgroun
     Guarda cambios masivos.
     En modo background:
     - actualiza cache local al instante,
-    - manda los bloques a Google Sheets en segundo plano.
+    - manda los bloques a Google Sheets en segundo plano,
+    - el estado se revisa desde el hilo principal.
     """
     if not items:
         return
@@ -622,7 +641,6 @@ def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250, backgroun
     update_estado_cache_from_payloads(items)
 
     chunks = chunk_list(items, chunk_size)
-    total_chunks = len(chunks)
 
     if not background:
         progress = st.sidebar.progress(0, text=f"Guardando cambios 0/{len(items)}")
@@ -639,24 +657,14 @@ def api_bulk_upsert_products(items: List[dict], chunk_size: int = 250, backgroun
         progress.empty()
         return
 
-    init_sync_state()
-    sync_status_increment_pending(total_chunks)
-
-    def _send_chunk(chunk: List[dict]):
-        api_call("bulk_upsert_products", {"items": chunk}, timeout=180)
-        return len(chunk)
-
-    for chunk in chunks:
-        future = SYNC_EXECUTOR.submit(_send_chunk, chunk)
-
-        def _done_callback(fut):
-            try:
-                fut.result()
-                sync_status_mark_ok(1)
-            except Exception as e:
-                sync_status_mark_error(e, 1)
-
-        future.add_done_callback(_done_callback)
+    for idx, chunk in enumerate(chunks, start=1):
+        future = get_sync_executor().submit(
+            api_call,
+            "bulk_upsert_products",
+            {"items": chunk},
+            180
+        )
+        enqueue_sync_job("cambio_masivo", future, f"bloque_{idx}", len(chunk))
 
 
 
@@ -1802,33 +1810,12 @@ def status_ui(estado_df: pd.DataFrame, inv_df: pd.DataFrame):
 # Módulo administrador
 # ============================================================
 
-def get_admin_password() -> str:
-    try:
-        return st.secrets.get("ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
-    except Exception:
-        return DEFAULT_ADMIN_PASSWORD
-
-
 def admin_login_ui() -> bool:
-    if st.session_state.get("admin_autenticado"):
-        cols = st.columns([3, 1])
-        cols[0].success("Administrador activo")
-        if cols[1].button("Cerrar sesión admin", use_container_width=True):
-            st.session_state["admin_autenticado"] = False
-            st.rerun()
-        return True
-
-    st.warning("Módulo restringido. Ingresa la clave de administrador.")
-    clave = st.text_input("Clave administrador", type="password", key="admin_password_input")
-
-    if st.button("Entrar como administrador", use_container_width=True):
-        if clave == get_admin_password():
-            st.session_state["admin_autenticado"] = True
-            st.rerun()
-        else:
-            st.error("Clave incorrecta.")
-
-    return False
+    """
+    App cerrada: el módulo Administrador queda disponible sin clave.
+    """
+    st.info("Modo administrador activo.")
+    return True
 
 
 def payload_from_queue_row(
@@ -2398,7 +2385,6 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
     st.caption("Módulo de superusuario para corregir estados, hacer cambios masivos y descargar bases.")
 
     if not admin_login_ui():
-        st.info("Configura `ADMIN_PASSWORD` en los Secrets de Streamlit para cambiar la clave por defecto.")
         return
 
     admin_kpis(queue_df, estado_df, inv_current_df)
@@ -2433,12 +2419,15 @@ def main():
     st.sidebar.caption("Modo rápido + sync segundo plano")
 
     init_sync_state()
-    pending_sync = st.session_state.get("sync_pending_count", 0)
+    pending_sync = get_pending_sync_count()
     ok_sync = st.session_state.get("sync_ok_count", 0)
     error_sync = st.session_state.get("sync_error_count", 0)
 
     if pending_sync:
         st.sidebar.warning(f"Sincronizando con Google Sheets: {pending_sync} pendiente(s)")
+        if st.sidebar.button("Revisar sincronización"):
+            check_sync_jobs()
+            st.rerun()
     else:
         st.sidebar.success("Sincronización al día")
 
