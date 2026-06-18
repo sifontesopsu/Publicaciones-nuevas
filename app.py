@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.19 - orden stock operador"
+APP_VERSION = "V6.21 - publicaciones por SKU"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -171,6 +171,69 @@ def read_excel_any(path_or_file) -> pd.DataFrame:
     if hasattr(path_or_file, "seek"):
         path_or_file.seek(0)
     return pd.read_excel(path_or_file, dtype=str)
+
+
+def read_publicaciones_excel(path_or_file) -> pd.DataFrame:
+    """
+    Lee archivos de publicaciones de Mercado Libre en ambos formatos:
+
+    1. Formato simple anterior:
+       SKU | Título | Link | Estado
+
+    2. Formato nuevo de Mercado Libre:
+       Hoja 'Publicaciones' con columnas:
+       FAMILY_ID | ITEM_ID | PRODUCT_NUMBER | VARIATION_ID | SKU | TITLE | VARIATIONS
+
+    El nuevo archivo trae además hojas de ayuda y filas informativas.
+    Esta función detecta la hoja y la fila real de encabezados.
+    """
+    if hasattr(path_or_file, "seek"):
+        path_or_file.seek(0)
+
+    try:
+        xls = pd.ExcelFile(path_or_file)
+        sheet_name = "Publicaciones" if "Publicaciones" in xls.sheet_names else xls.sheet_names[0]
+
+        if hasattr(path_or_file, "seek"):
+            path_or_file.seek(0)
+
+        raw = pd.read_excel(path_or_file, dtype=str, header=None, sheet_name=sheet_name)
+    except Exception:
+        return read_excel_any(path_or_file)
+
+    header_row_idx = None
+    rows_to_scan = min(30, len(raw))
+
+    for i in range(rows_to_scan):
+        row_values = ["" if pd.isna(v) else str(v).strip() for v in raw.iloc[i].tolist()]
+        row_norm = [norm_col(v) for v in row_values]
+
+        has_sku = any(v == "sku" or "seller_sku" in v or "seller sku" in v for v in row_norm)
+        has_publication_marker = any(
+            v in {"item_id", "itemid", "title", "titulo"} or
+            "numero de publicacion" in v or
+            "publicacion" in v or
+            "permalink" in v or
+            "link" in v
+            for v in row_norm
+        )
+
+        if has_sku and has_publication_marker:
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        # Si no encontró una fila especial, se comporta como el lector anterior.
+        if hasattr(path_or_file, "seek"):
+            path_or_file.seek(0)
+        return pd.read_excel(path_or_file, dtype=str, sheet_name=sheet_name)
+
+    columns = make_unique_columns(raw.iloc[header_row_idx].fillna("").astype(str).tolist())
+    df = raw.iloc[header_row_idx + 1:].copy()
+    df.columns = columns
+    df = df.dropna(how="all")
+
+    return df
 
 
 def make_unique_columns(cols: List[str]) -> List[str]:
@@ -697,23 +760,88 @@ def load_maestro() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_publicaciones() -> pd.DataFrame:
+    """
+    Carga publicaciones vigentes de Mercado Libre usando SKU como llave principal.
+
+    Regla operativa:
+    - La app NO decide por MLC / ITEM_ID.
+    - La app decide por SKU.
+    - Si un SKU aparece en el archivo de publicaciones ML, se considera publicado.
+    - ITEM_ID, PRODUCT_NUMBER y VARIATION_ID quedan solo como datos informativos.
+    """
     if not safe_file_exists(PUBLICACIONES_FILE):
         raise FileNotFoundError(f"No existe {PUBLICACIONES_FILE}")
 
-    df = read_excel_any(PUBLICACIONES_FILE)
+    df = read_publicaciones_excel(PUBLICACIONES_FILE)
 
-    sku_col = find_column(df, ["SKU"])
-    title_col = find_column(df, ["Titulo", "Título", "Publicación", "Publicacion", "Nombre", "Descripción", "Descripcion"], required=False)
-    link_col = find_column(df, ["Link", "Permalink", "URL", "Enlace"], required=False)
-    estado_col = find_column(df, ["Estado", "Status"], required=False)
+    sku_col = find_column(
+        df,
+        ["SKU", "Seller SKU", "seller_sku", "Código SKU", "Codigo SKU"],
+        required=True,
+    )
+
+    title_col = find_column(
+        df,
+        ["TITLE", "Titulo", "Título", "Publicación", "Publicacion", "Nombre", "Descripción", "Descripcion"],
+        required=False,
+    )
+
+    item_col = find_column(
+        df,
+        ["ITEM_ID", "Item ID", "Número de publicación", "Numero de publicacion", "Publicación", "Publicacion"],
+        required=False,
+    )
+
+    product_col = find_column(
+        df,
+        ["PRODUCT_NUMBER", "Número de producto", "Numero de producto"],
+        required=False,
+    )
+
+    variation_col = find_column(
+        df,
+        ["VARIATION_ID", "Número de variante", "Numero de variante", "Variation ID"],
+        required=False,
+    )
+
+    link_col = find_column(
+        df,
+        ["Link", "Permalink", "URL", "Enlace"],
+        required=False,
+    )
+
+    estado_col = find_column(
+        df,
+        ["Estado", "Status"],
+        required=False,
+    )
 
     out = pd.DataFrame()
+
+    # LLAVE REAL DE LA APP
     out["SKU"] = df[sku_col].map(clean_sku)
+
+    # Datos solo informativos
     out["TituloML"] = df[title_col].fillna("").astype(str) if title_col else ""
-    out["LinkML"] = df[link_col].fillna("").astype(str) if link_col else ""
+    out["ItemID"] = df[item_col].fillna("").astype(str) if item_col else ""
+    out["ProductNumber"] = df[product_col].fillna("").astype(str) if product_col else ""
+    out["VariationID"] = df[variation_col].fillna("").astype(str) if variation_col else ""
     out["EstadoML"] = df[estado_col].fillna("").astype(str) if estado_col else ""
+    out["LinkML"] = df[link_col].fillna("").astype(str) if link_col else ""
+
+    # Limpieza fuerte: solo SKUs reales.
+    invalid_skus = {"", "sku", "nan", "none", "22"}
+    out = out[~out["SKU"].fillna("").astype(str).str.lower().str.strip().isin(invalid_skus)]
+
+    # Evitar filas de instrucciones/ayuda del archivo Mercado Libre.
+    if "TituloML" in out.columns:
+        out = out[~out["TituloML"].fillna("").astype(str).str.lower().str.strip().isin({"", "título", "titulo", "title"})]
+
+    # Dedupe por SKU porque la comparación debe ser SKU inventario vs SKU publicaciones.
     out = out[out["SKU"] != ""].drop_duplicates(subset=["SKU"], keep="first")
+
     return out
+
 
 
 @st.cache_data(show_spinner=False)
