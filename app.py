@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.16 - motivo uso interno"
+APP_VERSION = "V6.17 - cambio masivo seleccionable"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -2559,48 +2559,118 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
     st.divider()
 
     # ========================================================
-    # Cambio masivo dentro del mismo panel, no como pestaña
+    # Cambio masivo seleccionable dentro del mismo panel
     # ========================================================
-    with st.expander("Cambio masivo de productos filtrados", expanded=False):
-        st.warning("Esta acción aplica el cambio a todos los productos filtrados en la vista actual.")
+    st.markdown("### Cambio masivo por selección")
+    st.caption("Marca solo los productos que quieres modificar. El cambio masivo se aplicará únicamente a los seleccionados.")
 
-        mb1, mb2 = st.columns([1.4, 1.4])
-        estado_masivo = mb1.selectbox("Nuevo estado masivo", ESTADOS, key="admin_panel_estado_masivo")
+    if "admin_bulk_selected_skus" not in st.session_state:
+        st.session_state["admin_bulk_selected_skus"] = []
 
-        if estado_masivo == "NO PUBLICABLE":
-            motivo_masivo = mb2.selectbox("Motivo no publicable", MOTIVOS_NO_PUBLICABLE, key="admin_panel_motivo_masivo_np")
+    seleccion_limite = st.selectbox(
+        "Productos a mostrar en lista de selección",
+        [25, 50, 100, 200],
+        index=1,
+        key="admin_bulk_selection_limit",
+    )
+
+    df_bulk_visible = df.head(int(seleccion_limite)).copy()
+    visible_skus = df_bulk_visible["SKU"].astype(str).tolist()
+
+    sel_tools_1, sel_tools_2, sel_tools_3 = st.columns([1.2, 1.2, 2.6])
+
+    if sel_tools_1.button("Marcar visibles", use_container_width=True, key="admin_bulk_marcar_visibles"):
+        actuales = set(st.session_state.get("admin_bulk_selected_skus", []))
+        actuales.update(visible_skus)
+        st.session_state["admin_bulk_selected_skus"] = sorted(actuales)
+        st.rerun()
+
+    if sel_tools_2.button("Limpiar selección", use_container_width=True, key="admin_bulk_limpiar"):
+        st.session_state["admin_bulk_selected_skus"] = []
+        st.rerun()
+
+    sel_tools_3.info(f"Seleccionados: {len(st.session_state.get('admin_bulk_selected_skus', [])):,}")
+
+    with st.container(border=True):
+        st.write("**Lista para marcar**")
+
+        for idx_bulk, row_bulk in df_bulk_visible.iterrows():
+            sku_bulk = str(row_bulk.get("SKU", ""))
+            desc_bulk = str(row_bulk.get("Descripcion", ""))
+            estado_bulk = str(row_bulk.get("Estado", ""))
+            stock_bulk = row_bulk.get("StockSistema", 0)
+            motivo_bulk = str(row_bulk.get("Motivo", "") or "")
+
+            selected_now = sku_bulk in set(st.session_state.get("admin_bulk_selected_skus", []))
+
+            chk_col, info_col, state_col = st.columns([0.35, 4.7, 1.4])
+
+            checked = chk_col.checkbox(
+                " ",
+                value=selected_now,
+                key=f"admin_bulk_chk_{sku_bulk}_{idx_bulk}",
+                label_visibility="collapsed",
+            )
+
+            if checked and not selected_now:
+                seleccion = set(st.session_state.get("admin_bulk_selected_skus", []))
+                seleccion.add(sku_bulk)
+                st.session_state["admin_bulk_selected_skus"] = sorted(seleccion)
+            elif not checked and selected_now:
+                seleccion = set(st.session_state.get("admin_bulk_selected_skus", []))
+                seleccion.discard(sku_bulk)
+                st.session_state["admin_bulk_selected_skus"] = sorted(seleccion)
+
+            stock_text = f"{stock_bulk:g}" if isinstance(stock_bulk, (int, float)) else str(stock_bulk)
+            info_col.markdown(f"**{sku_bulk}** — {desc_bulk}")
+            info_col.caption(f"Stock Kame: {stock_text} | Motivo: {motivo_bulk if motivo_bulk else '-'}")
+            state_col.info(estado_bulk)
+
+    selected_skus = set(st.session_state.get("admin_bulk_selected_skus", []))
+    df_selected = df[df["SKU"].astype(str).isin(selected_skus)].copy()
+
+    st.write(f"Productos seleccionados para modificar: **{len(df_selected):,}**")
+
+    mb1, mb2 = st.columns([1.4, 1.4])
+    estado_masivo = mb1.selectbox("Nuevo estado para seleccionados", ESTADOS, key="admin_panel_estado_masivo")
+
+    if estado_masivo == "NO PUBLICABLE":
+        motivo_masivo = mb2.selectbox("Motivo no publicable", MOTIVOS_NO_PUBLICABLE, key="admin_panel_motivo_masivo_np")
+    else:
+        motivo_masivo = mb2.selectbox("Motivo", MOTIVOS_GENERALES, key="admin_panel_motivo_masivo_general")
+
+    confirmar_masivo = st.checkbox(
+        f"Confirmo aplicar el cambio a {len(df_selected):,} producto(s) seleccionado(s)",
+        key="admin_panel_confirmar_masivo",
+    )
+
+    if st.button("Aplicar cambio masivo a seleccionados", use_container_width=True, key="admin_panel_boton_masivo"):
+        if df_selected.empty:
+            st.error("Primero marca al menos un producto en la lista.")
+        elif not confirmar_masivo:
+            st.error("Debes confirmar antes de aplicar el cambio masivo.")
         else:
-            motivo_masivo = mb2.selectbox("Motivo", MOTIVOS_GENERALES, key="admin_panel_motivo_masivo_general")
-
-        confirmar_masivo = st.checkbox(
-            f"Confirmo aplicar a {len(df):,} productos filtrados",
-            key="admin_panel_confirmar_masivo",
-        )
-
-        if st.button("Aplicar cambio masivo a vista filtrada", use_container_width=True, key="admin_panel_boton_masivo"):
-            if not confirmar_masivo:
-                st.error("Debes confirmar antes de aplicar el cambio masivo.")
-            else:
-                try:
-                    items = []
-                    for _, row in df.iterrows():
-                        items.append(
-                            payload_from_queue_row(
-                                row,
-                                estado_masivo,
-                                APP_USER_ADMIN,
-                                motivo_masivo or "Cambio masivo administrador",
-                                "",
-                                str(row.get("LinkPublicacion", "") or ""),
-                                accion="CAMBIO MASIVO ADMINISTRADOR",
-                            )
+            try:
+                items = []
+                for _, row in df_selected.iterrows():
+                    items.append(
+                        payload_from_queue_row(
+                            row,
+                            estado_masivo,
+                            APP_USER_ADMIN,
+                            motivo_masivo or "Cambio masivo administrador",
+                            "",
+                            str(row.get("LinkPublicacion", "") or ""),
+                            accion="CAMBIO MASIVO ADMINISTRADOR",
                         )
+                    )
 
-                    api_bulk_upsert_products(items, chunk_size=250)
-                    st.success(f"Cambio masivo aplicado localmente a {len(items):,} productos. Se sincroniza con Sheets en segundo plano.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo aplicar cambio masivo: {e}")
+                api_bulk_upsert_products(items, chunk_size=250)
+                st.session_state["admin_bulk_selected_skus"] = []
+                st.success(f"Cambio masivo aplicado localmente a {len(items):,} producto(s). Se sincroniza con Sheets en segundo plano.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo aplicar cambio masivo: {e}")
 
     st.divider()
 
