@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.14 - no persiste estados automaticos"
+APP_VERSION = "V6.15 - base inicial inventario"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -995,8 +995,18 @@ def build_work_queue(
         # Los estados automáticos antiguos no deben tratarse como gestión real.
         # La app puede calcular LLEGÓ STOCK o PRODUCTO NUEVO CON STOCK,
         # pero no debe preservar esos registros como si fueran movimientos manuales.
-        if existing_state and str(existing_state.get("accion", "") or "").upper() == "ESTADO AUTOMÁTICO":
-            existing_state = None
+        if existing_state:
+            existing_accion = str(existing_state.get("accion", "") or "").upper().strip()
+            existing_estado_raw = normalize_estado_operativo(str(existing_state.get("estado", "") or ""))
+
+            if existing_accion == "ESTADO AUTOMÁTICO":
+                existing_state = None
+            elif existing_estado_raw in {"LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK"} and existing_accion not in {
+                "CAMBIO OPERATIVO",
+                "CAMBIO ADMINISTRADOR",
+                "CAMBIO MASIVO ADMINISTRADOR",
+            }:
+                existing_state = None
 
         # Los SKUs publicados desde el archivo de publicaciones no entran a cola
         # salvo que tengan un estado manual guardado.
@@ -1026,12 +1036,15 @@ def build_work_queue(
             estado_sugerido = "CUBIERTO POR UNIDAD"
             relacion = "Pack ya cubierto por unidad/componente publicado"
             sku_relacionado = ", ".join(published_units[:5])
-        elif stock_actual > 0 and sku in previous_stock_map and stock_anterior <= 0:
-            # Solo es "LLEGÓ STOCK" si el SKU existía en el inventario anterior
-            # y antes estaba en 0 o menos. Si no había historial previo, no se debe
-            # interpretar como llegada de stock.
+        elif stock_actual > 0 and previous_stock_map and sku in previous_stock_map and stock_anterior <= 0:
+            # LLEGÓ STOCK solo se permite desde la segunda carga en adelante:
+            # debe existir una base anterior real, el SKU debe estar en esa base,
+            # antes tenía 0 o menos, y ahora tiene stock.
             estado_sugerido = "LLEGÓ STOCK"
         elif stock_actual > 0:
+            # Si es primera carga o el SKU no existe en la base anterior,
+            # NO se puede afirmar que "llegó stock".
+            # Solo sabemos que tiene stock disponible y debe revisarse/publicarse.
             estado_sugerido = "PENDIENTE PUBLICAR"
         else:
             estado_sugerido = "SIN STOCK"
@@ -1251,6 +1264,7 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
         try:
             inv_new_df = load_inventory_from_upload(uploaded_inventory)
             prev_map = previous_stock_map_from_inventory(inv_current_df)
+            es_base_inicial = len(prev_map) == 0
 
             queue_tmp = build_work_queue(
                 maestro=maestro,
@@ -1262,7 +1276,15 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
             )
 
             productos_nuevos = int((queue_tmp["Origen"] == "PRODUCTO NUEVO").sum()) if not queue_tmp.empty else 0
-            llegaron_stock = int((queue_tmp["Estado"] == "LLEGÓ STOCK").sum()) if not queue_tmp.empty and prev_map else 0
+
+            if es_base_inicial:
+                llegaron_stock = 0
+                st.sidebar.warning(
+                    "Primera carga detectada: este LibroInventario se guardará como BASE INICIAL. "
+                    "No se generarán productos como LLEGÓ STOCK."
+                )
+            else:
+                llegaron_stock = int((queue_tmp["Estado"] == "LLEGÓ STOCK").sum()) if not queue_tmp.empty else 0
 
             st.sidebar.info("Enviando inventario a Google Sheets en segundo plano...")
             api_replace_inventory(
@@ -1276,12 +1298,18 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
             # Los estados automáticos como LLEGÓ STOCK o PRODUCTO NUEVO CON STOCK
             # se calculan en pantalla, pero ya no se guardan en Sheets ni en auditoría.
             # Solo se guardan acciones reales del operador o administrador.
-            st.sidebar.caption("Estados automáticos calculados en pantalla; no se guardan como movimientos.")
+            st.sidebar.caption("Estados calculados en pantalla; solo desde la segunda carga se detecta LLEGÓ STOCK real.")
 
-            st.sidebar.success(
-                f"Inventario guardado: {len(inv_new_df):,} SKUs | "
-                f"Nuevos: {productos_nuevos:,} | Llegó stock: {llegaron_stock:,}"
-            )
+            if es_base_inicial:
+                st.sidebar.success(
+                    f"Base inicial guardada: {len(inv_new_df):,} SKUs | "
+                    f"Nuevos detectados: {productos_nuevos:,} | Llegó stock: 0"
+                )
+            else:
+                st.sidebar.success(
+                    f"Inventario guardado: {len(inv_new_df):,} SKUs | "
+                    f"Nuevos: {productos_nuevos:,} | Llegó stock real: {llegaron_stock:,}"
+                )
 
             if "ultimo_inventario_header_excel" in st.session_state:
                 st.sidebar.info(
