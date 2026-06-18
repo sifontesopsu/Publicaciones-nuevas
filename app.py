@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.12 - KPIs admin claros"
+APP_VERSION = "V6.14 - no persiste estados automaticos"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -992,6 +992,12 @@ def build_work_queue(
         is_published = sku in published_all
         existing_state = state_map.get(sku)
 
+        # Los estados automáticos antiguos no deben tratarse como gestión real.
+        # La app puede calcular LLEGÓ STOCK o PRODUCTO NUEVO CON STOCK,
+        # pero no debe preservar esos registros como si fueran movimientos manuales.
+        if existing_state and str(existing_state.get("accion", "") or "").upper() == "ESTADO AUTOMÁTICO":
+            existing_state = None
+
         # Los SKUs publicados desde el archivo de publicaciones no entran a cola
         # salvo que tengan un estado manual guardado.
         if is_published and not existing_state:
@@ -1020,7 +1026,10 @@ def build_work_queue(
             estado_sugerido = "CUBIERTO POR UNIDAD"
             relacion = "Pack ya cubierto por unidad/componente publicado"
             sku_relacionado = ", ".join(published_units[:5])
-        elif stock_actual > 0 and stock_anterior <= 0:
+        elif stock_actual > 0 and sku in previous_stock_map and stock_anterior <= 0:
+            # Solo es "LLEGÓ STOCK" si el SKU existía en el inventario anterior
+            # y antes estaba en 0 o menos. Si no había historial previo, no se debe
+            # interpretar como llegada de stock.
             estado_sugerido = "LLEGÓ STOCK"
         elif stock_actual > 0:
             estado_sugerido = "PENDIENTE PUBLICAR"
@@ -1038,7 +1047,7 @@ def build_work_queue(
 
             if old_estado in ESTADOS_MANUALES_PROTEGIDOS:
                 estado_final = old_estado
-            elif old_estado == "LLEGÓ STOCK" and stock_actual > 0:
+            elif old_estado == "LLEGÓ STOCK" and stock_actual > 0 and estado_sugerido == "LLEGÓ STOCK":
                 estado_final = old_estado
             elif old_estado == "PRODUCTO NUEVO CON STOCK" and is_product_new and stock_actual > 0:
                 estado_final = old_estado
@@ -1078,8 +1087,9 @@ def build_work_queue(
 
 def build_auto_alerts(queue_df: pd.DataFrame, estado_api_df: pd.DataFrame) -> List[dict]:
     """
-    Guarda en Google Sheets solo alertas útiles.
-    No guarda todos los SIN STOCK para no llenar la hoja.
+    OBSOLETA.
+    Ya no se usa para guardar estados automáticos.
+    Los estados automáticos se calculan en pantalla y no se persisten en Sheets.
     """
     state_map = get_state_map(estado_api_df)
     items = []
@@ -1087,6 +1097,8 @@ def build_auto_alerts(queue_df: pd.DataFrame, estado_api_df: pd.DataFrame) -> Li
     if queue_df.empty:
         return items
 
+    # LLEGÓ STOCK solo llega aquí si el motor detectó transición real:
+    # SKU existía en inventario anterior con 0 y ahora tiene stock.
     alert_states = {"LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK"}
 
     for _, row in queue_df.iterrows():
@@ -1250,7 +1262,7 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
             )
 
             productos_nuevos = int((queue_tmp["Origen"] == "PRODUCTO NUEVO").sum()) if not queue_tmp.empty else 0
-            llegaron_stock = int((queue_tmp["Estado"] == "LLEGÓ STOCK").sum()) if not queue_tmp.empty else 0
+            llegaron_stock = int((queue_tmp["Estado"] == "LLEGÓ STOCK").sum()) if not queue_tmp.empty and prev_map else 0
 
             st.sidebar.info("Enviando inventario a Google Sheets en segundo plano...")
             api_replace_inventory(
@@ -1260,10 +1272,11 @@ def inventory_upload_ui(maestro, publicaciones, packs, estado_df, inv_current_df
                 llegaron_stock=llegaron_stock,
             )
 
-            auto_alerts = build_auto_alerts(queue_tmp, estado_df)
-            if auto_alerts:
-                st.sidebar.info(f"Guardando {len(auto_alerts):,} alertas automáticas por bloques...")
-            api_bulk_upsert_products(auto_alerts)
+            # Importante:
+            # Los estados automáticos como LLEGÓ STOCK o PRODUCTO NUEVO CON STOCK
+            # se calculan en pantalla, pero ya no se guardan en Sheets ni en auditoría.
+            # Solo se guardan acciones reales del operador o administrador.
+            st.sidebar.caption("Estados automáticos calculados en pantalla; no se guardan como movimientos.")
 
             st.sidebar.success(
                 f"Inventario guardado: {len(inv_new_df):,} SKUs | "
@@ -1734,7 +1747,7 @@ def auditoria_ui():
     inject_operational_css()
 
     st.subheader("Auditoría")
-    st.caption("Aquí se revisa quién cambió cada producto, cuándo y por qué. No muestra la cola actual, solo movimientos.")
+    st.caption("Aquí se revisan movimientos reales. Los estados automáticos antiguos se ocultan por defecto porque no representan gestión humana.")
 
     try:
         data = api_call("get_history", {"limit": 1000}, timeout=60)
@@ -1745,14 +1758,25 @@ def auditoria_ui():
             st.info("Todavía no hay movimientos registrados.")
             return
 
+        # Por defecto ocultamos movimientos automáticos antiguos porque no son gestión real.
+        mostrar_automaticos = st.checkbox(
+            "Mostrar movimientos automáticos antiguos",
+            value=False,
+            key="aud_mostrar_automaticos",
+        )
+
+        if not mostrar_automaticos and "Accion" in df.columns:
+            df = df[df["Accion"].fillna("").astype(str).str.upper() != "ESTADO AUTOMÁTICO"]
+
         c1, c2 = st.columns([1.2, 2.8])
         accion_filter = "TODAS"
         search = ""
 
         if "Accion" in df.columns:
+            acciones_disponibles = sorted(df["Accion"].fillna("").astype(str).unique().tolist())
             accion_filter = c1.selectbox(
                 "Acción",
-                ["TODAS"] + sorted(df["Accion"].fillna("").astype(str).unique().tolist()),
+                ["TODAS"] + acciones_disponibles,
                 key="aud_accion",
             )
 
