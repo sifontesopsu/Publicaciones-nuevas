@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.11 - admin limpio sin descargas"
+APP_VERSION = "V6.12 - KPIs admin claros"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -1888,12 +1888,38 @@ def parse_skus(text_skus: str) -> List[str]:
 
 
 def admin_kpis(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_current_df: pd.DataFrame):
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Cola total", len(queue_df))
-    c2.metric("Estados guardados", len(estado_df))
-    c3.metric("Inventario SKUs", len(inv_current_df))
-    c4.metric("Faltante físico", int((queue_df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME").sum()) if not queue_df.empty else 0)
-    c5.metric("No publicables", int((queue_df["Estado"] == "NO PUBLICABLE").sum()) if not queue_df.empty else 0)
+    """
+    KPIs claros para administración.
+    Se elimina 'Estados guardados' porque no se entiende operacionalmente.
+    """
+    if queue_df.empty:
+        st.info("No hay productos cargados para mostrar indicadores.")
+        return
+
+    total_gestion = len(queue_df)
+    pendientes = int(queue_df["Estado"].isin(["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"]).sum())
+    pickeados = int(queue_df["Estado"].isin(["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"]).sum())
+    faltante = int((queue_df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME").sum())
+    no_publicables = int((queue_df["Estado"] == "NO PUBLICABLE").sum())
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Productos en gestión", total_gestion)
+    k2.metric("Por pickear/revisar", pendientes)
+    k3.metric("Pickeados para publicar", pickeados)
+    k4.metric("Faltante físico", faltante)
+    k5.metric("No publicables", no_publicables)
+
+    publicados = int(queue_df["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"]).sum())
+    sin_stock = int(queue_df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"]).sum())
+    cubiertos = int(queue_df["Estado"].isin(["CUBIERTO POR PACK", "CUBIERTO POR UNIDAD"]).sum())
+    inventario_total = len(inv_current_df)
+
+    k6, k7, k8, k9 = st.columns(4)
+    k6.metric("Publicados", publicados)
+    k7.metric("Sin stock Kame", sin_stock)
+    k8.metric("Cubiertos pack/unidad", cubiertos)
+    k9.metric("SKUs inventario Kame", inventario_total)
+
 
 
 def admin_filtros(queue_df: pd.DataFrame, prefix: str = "admin") -> pd.DataFrame:
