@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.10 - admin panel unico"
+APP_VERSION = "V6.11 - admin limpio sin descargas"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -2382,7 +2382,7 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
     inject_operational_css()
 
     st.subheader("Administrador")
-    st.caption("Panel único para ver productos por estado y corregirlos sin entrar a Google Sheets.")
+    st.caption("Panel único para ver productos por estado y corregirlos. Los informes y descargas quedan en el módulo Informes.")
 
     if not admin_login_ui():
         return
@@ -2418,8 +2418,8 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
     familias = ["TODAS"] + sorted([f for f in queue_df["Familia"].fillna("").astype(str).unique().tolist() if f.strip()])
     familia = c2.selectbox("Familia", familias, key="admin_panel_familia")
 
-    motivos = ["TODOS"] + sorted([m for m in queue_df["Motivo"].fillna("").astype(str).unique().tolist() if m.strip()])
-    motivo_filter = c3.selectbox("Motivo", motivos, key="admin_panel_motivo")
+    motivos_admin = ["TODOS"] + [m for m in MOTIVOS_NO_PUBLICABLE if m]
+    motivo_filter = c3.selectbox("Motivo", motivos_admin, key="admin_panel_motivo")
 
     search = c4.text_input("Buscar SKU o descripción", key="admin_panel_buscar")
 
@@ -2471,38 +2471,7 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
 
     c7.write(f"Productos filtrados: **{len(df):,}**")
 
-    base_cols = [
-        "SKU", "Descripcion", "Familia", "EAN", "Origen",
-        "StockSistema", "Estado", "Motivo", "Observacion",
-        "RelacionPackUnidad", "SKURelacionadoPublicado", "LinkPublicacion"
-    ]
-    base_cols = [c for c in base_cols if c in df.columns]
-
-    d1, d2 = st.columns([1.5, 1.5])
-    d1.download_button(
-        "Descargar vista actual",
-        data=export_excel(df[base_cols] if not df.empty else pd.DataFrame(columns=base_cols)),
-        file_name=f"admin_vista_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        disabled=df.empty,
-        key="admin_panel_download_vista",
-    )
-
-    resumen_estado = (
-        queue_df.groupby("Estado", dropna=False)
-        .size()
-        .reset_index(name="Cantidad")
-        .sort_values("Cantidad", ascending=False)
-    )
-    d2.download_button(
-        "Descargar resumen por estado",
-        data=export_excel(resumen_estado),
-        file_name=f"admin_resumen_estados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="admin_panel_download_resumen",
-    )
+    st.caption("Las descargas se gestionan desde el módulo Informes. Este panel queda solo para administrar y corregir estados.")
 
     if df.empty:
         st.info("No hay productos con los filtros seleccionados.")
@@ -2513,7 +2482,7 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
     # ========================================================
     # Cambio masivo dentro del mismo panel, no como pestaña
     # ========================================================
-    with st.expander("Cambio masivo para la vista filtrada", expanded=False):
+    with st.expander("Cambio masivo de productos filtrados", expanded=False):
         st.warning("Esta acción aplica el cambio a todos los productos filtrados en la vista actual.")
 
         mb1, mb2 = st.columns([1.4, 1.4])
