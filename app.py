@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.9.5 - admin sin clave"
+APP_VERSION = "V6.10 - admin panel unico"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -2382,35 +2382,320 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
     inject_operational_css()
 
     st.subheader("Administrador")
-    st.caption("Módulo de superusuario para corregir estados, hacer cambios masivos y descargar bases.")
+    st.caption("Panel único para ver productos por estado y corregirlos sin entrar a Google Sheets.")
 
     if not admin_login_ui():
         return
 
+    if queue_df.empty:
+        st.info("No hay datos para administrar. Primero carga inventario o actualiza datos desde Google Sheets.")
+        return
+
     admin_kpis(queue_df, estado_df, inv_current_df)
 
-    tabs_admin = st.tabs([
-        "Editar SKU",
-        "Cambios masivos",
-        "Forzar SKU manual",
-        "Informes admin",
-        "Descargas",
-    ])
+    st.divider()
 
-    with tabs_admin[0]:
-        admin_editar_un_sku(queue_df)
+    # ========================================================
+    # Vista rápida por estado
+    # ========================================================
+    st.markdown("### Vista por estado")
 
-    with tabs_admin[1]:
-        admin_cambios_masivos(queue_df)
+    estados_base = [
+        "TODOS",
+        "PENDIENTES POR PICKEAR/REVISAR",
+        "PICKEADOS PARA PUBLICAR",
+        "FALTANTE FÍSICO CON STOCK KAME",
+        "NO PUBLICABLE",
+        "PUBLICADO",
+        "SIN STOCK",
+        "CUBIERTO POR PACK/UNIDAD",
+    ]
 
-    with tabs_admin[2]:
-        admin_crear_o_forzar_sku()
+    c1, c2, c3, c4 = st.columns([1.8, 1.6, 1.6, 2.4])
 
-    with tabs_admin[3]:
-        admin_informes_personalizados(queue_df)
+    estado_grupo = c1.selectbox("Estado / cola", estados_base, key="admin_panel_estado_grupo")
 
-    with tabs_admin[4]:
-        admin_descargas(queue_df, estado_df, inv_current_df)
+    familias = ["TODAS"] + sorted([f for f in queue_df["Familia"].fillna("").astype(str).unique().tolist() if f.strip()])
+    familia = c2.selectbox("Familia", familias, key="admin_panel_familia")
+
+    motivos = ["TODOS"] + sorted([m for m in queue_df["Motivo"].fillna("").astype(str).unique().tolist() if m.strip()])
+    motivo_filter = c3.selectbox("Motivo", motivos, key="admin_panel_motivo")
+
+    search = c4.text_input("Buscar SKU o descripción", key="admin_panel_buscar")
+
+    df = queue_df.copy()
+
+    if estado_grupo == "PENDIENTES POR PICKEAR/REVISAR":
+        df = df[df["Estado"].isin(["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"])]
+    elif estado_grupo == "PICKEADOS PARA PUBLICAR":
+        df = df[df["Estado"].isin(["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"])]
+    elif estado_grupo == "FALTANTE FÍSICO CON STOCK KAME":
+        df = df[df["Estado"] == "FALTANTE FÍSICO CON STOCK KAME"]
+    elif estado_grupo == "NO PUBLICABLE":
+        df = df[df["Estado"] == "NO PUBLICABLE"]
+    elif estado_grupo == "PUBLICADO":
+        df = df[df["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"])]
+    elif estado_grupo == "SIN STOCK":
+        df = df[df["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])]
+    elif estado_grupo == "CUBIERTO POR PACK/UNIDAD":
+        df = df[df["Estado"].isin(["CUBIERTO POR PACK", "CUBIERTO POR UNIDAD"])]
+
+    if familia != "TODAS":
+        df = df[df["Familia"] == familia]
+
+    if motivo_filter != "TODOS":
+        df = df[df["Motivo"].fillna("").astype(str) == motivo_filter]
+
+    if search.strip():
+        s = search.strip().lower()
+        mask = (
+            df["SKU"].fillna("").astype(str).str.lower().str.contains(s, na=False) |
+            df["Descripcion"].fillna("").astype(str).str.lower().str.contains(s, na=False)
+        )
+        if "Motivo" in df.columns:
+            mask = mask | df["Motivo"].fillna("").astype(str).str.lower().str.contains(s, na=False)
+        df = df[mask]
+
+    df = priority_sort(df)
+
+    c5, c6, c7 = st.columns([1.2, 1.2, 2.6])
+    cantidad = c5.selectbox("Mostrar", [10, 20, 50, 100, 200], index=1, key="admin_panel_cantidad")
+    orden = c6.selectbox("Orden", ["Prioridad", "Mayor stock", "SKU", "Familia"], key="admin_panel_orden")
+
+    if orden == "Mayor stock":
+        df = df.sort_values("StockSistema", ascending=False)
+    elif orden == "SKU":
+        df = df.sort_values("SKU", ascending=True)
+    elif orden == "Familia":
+        df = df.sort_values(["Familia", "Descripcion"], ascending=True)
+
+    c7.write(f"Productos filtrados: **{len(df):,}**")
+
+    base_cols = [
+        "SKU", "Descripcion", "Familia", "EAN", "Origen",
+        "StockSistema", "Estado", "Motivo", "Observacion",
+        "RelacionPackUnidad", "SKURelacionadoPublicado", "LinkPublicacion"
+    ]
+    base_cols = [c for c in base_cols if c in df.columns]
+
+    d1, d2 = st.columns([1.5, 1.5])
+    d1.download_button(
+        "Descargar vista actual",
+        data=export_excel(df[base_cols] if not df.empty else pd.DataFrame(columns=base_cols)),
+        file_name=f"admin_vista_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        disabled=df.empty,
+        key="admin_panel_download_vista",
+    )
+
+    resumen_estado = (
+        queue_df.groupby("Estado", dropna=False)
+        .size()
+        .reset_index(name="Cantidad")
+        .sort_values("Cantidad", ascending=False)
+    )
+    d2.download_button(
+        "Descargar resumen por estado",
+        data=export_excel(resumen_estado),
+        file_name=f"admin_resumen_estados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="admin_panel_download_resumen",
+    )
+
+    if df.empty:
+        st.info("No hay productos con los filtros seleccionados.")
+        return
+
+    st.divider()
+
+    # ========================================================
+    # Cambio masivo dentro del mismo panel, no como pestaña
+    # ========================================================
+    with st.expander("Cambio masivo para la vista filtrada", expanded=False):
+        st.warning("Esta acción aplica el cambio a todos los productos filtrados en la vista actual.")
+
+        mb1, mb2 = st.columns([1.4, 1.4])
+        estado_masivo = mb1.selectbox("Nuevo estado masivo", ESTADOS, key="admin_panel_estado_masivo")
+
+        if estado_masivo == "NO PUBLICABLE":
+            motivo_masivo = mb2.selectbox("Motivo no publicable", MOTIVOS_NO_PUBLICABLE, key="admin_panel_motivo_masivo_np")
+        else:
+            motivo_masivo = mb2.selectbox("Motivo", MOTIVOS_GENERALES, key="admin_panel_motivo_masivo_general")
+
+        confirmar_masivo = st.checkbox(
+            f"Confirmo aplicar a {len(df):,} productos filtrados",
+            key="admin_panel_confirmar_masivo",
+        )
+
+        if st.button("Aplicar cambio masivo a vista filtrada", use_container_width=True, key="admin_panel_boton_masivo"):
+            if not confirmar_masivo:
+                st.error("Debes confirmar antes de aplicar el cambio masivo.")
+            else:
+                try:
+                    items = []
+                    for _, row in df.iterrows():
+                        items.append(
+                            payload_from_queue_row(
+                                row,
+                                estado_masivo,
+                                APP_USER_ADMIN,
+                                motivo_masivo or "Cambio masivo administrador",
+                                "",
+                                str(row.get("LinkPublicacion", "") or ""),
+                                accion="CAMBIO MASIVO ADMINISTRADOR",
+                            )
+                        )
+
+                    api_bulk_upsert_products(items, chunk_size=250)
+                    st.success(f"Cambio masivo aplicado localmente a {len(items):,} productos. Se sincroniza con Sheets en segundo plano.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo aplicar cambio masivo: {e}")
+
+    st.divider()
+
+    # ========================================================
+    # Lista administrable
+    # ========================================================
+    st.markdown("### Productos de la vista")
+
+    for idx, row in df.head(int(cantidad)).iterrows():
+        sku = str(row.get("SKU", ""))
+        estado_actual = str(row.get("Estado", ""))
+        descripcion = str(row.get("Descripcion", ""))
+        familia_actual = str(row.get("Familia", ""))
+        stock = row.get("StockSistema", 0)
+        origen = str(row.get("Origen", ""))
+        ean = str(row.get("EAN", "") or "")
+        motivo_actual = str(row.get("Motivo", "") or "")
+        relacion = str(row.get("RelacionPackUnidad", "") or "")
+        relacionado = str(row.get("SKURelacionadoPublicado", "") or "")
+        link_actual = str(row.get("LinkPublicacion", "") or "")
+
+        with st.container(border=True):
+            top1, top2, top3 = st.columns([1.5, 5.2, 1.8])
+
+            with top1:
+                st.markdown(f"**SKU:** `{sku}`")
+                st.markdown(f"**Stock Kame:** `{stock:g}`" if isinstance(stock, (int, float)) else f"**Stock Kame:** `{stock}`")
+
+            with top2:
+                st.markdown(f"**{descripcion}**")
+                st.caption(f"Familia: {familia_actual} | Origen: {origen} | EAN: {ean}")
+                if motivo_actual:
+                    st.caption(f"Motivo actual: {motivo_actual}")
+                if relacion:
+                    st.warning(f"{relacion}: {relacionado}")
+
+            with top3:
+                st.markdown(f"**Estado actual:**")
+                st.info(estado_actual)
+
+            e1, e2, e3 = st.columns([1.5, 1.8, 2.2])
+
+            estado_index = ESTADOS.index(estado_actual) if estado_actual in ESTADOS else 0
+            nuevo_estado = e1.selectbox(
+                "Nuevo estado",
+                ESTADOS,
+                index=estado_index,
+                key=f"admin_panel_estado_{sku}_{idx}",
+            )
+
+            if nuevo_estado == "NO PUBLICABLE":
+                motivo_admin = e2.selectbox(
+                    "Motivo",
+                    MOTIVOS_NO_PUBLICABLE,
+                    index=MOTIVOS_NO_PUBLICABLE.index(motivo_actual) if motivo_actual in MOTIVOS_NO_PUBLICABLE else 0,
+                    key=f"admin_panel_motivo_np_{sku}_{idx}",
+                )
+            else:
+                motivo_admin = e2.selectbox(
+                    "Motivo",
+                    MOTIVOS_GENERALES,
+                    index=MOTIVOS_GENERALES.index(motivo_actual) if motivo_actual in MOTIVOS_GENERALES else 0,
+                    key=f"admin_panel_motivo_general_{sku}_{idx}",
+                )
+
+            link_publicacion = e3.text_input(
+                "Link publicación",
+                value=link_actual,
+                key=f"admin_panel_link_{sku}_{idx}",
+                placeholder="Opcional",
+            )
+
+            b1, b2, b3, b4 = st.columns(4)
+
+            if b1.button("Guardar cambio", key=f"admin_panel_guardar_{sku}_{idx}", use_container_width=True):
+                try:
+                    payload = payload_from_queue_row(
+                        row,
+                        nuevo_estado,
+                        APP_USER_ADMIN,
+                        motivo_admin or "Cambio administrador",
+                        "",
+                        link_publicacion.strip(),
+                        accion="CAMBIO ADMINISTRADOR",
+                    )
+                    api_upsert_product(payload)
+                    st.success(f"{sku} actualizado a {nuevo_estado}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
+
+            if b2.button("Publicado", key=f"admin_panel_publicado_{sku}_{idx}", use_container_width=True):
+                try:
+                    estado_publicado = "PRODUCTO NUEVO PUBLICADO" if origen == "PRODUCTO NUEVO" else "PUBLICADO"
+                    payload = payload_from_queue_row(
+                        row,
+                        estado_publicado,
+                        APP_USER_ADMIN,
+                        "Publicado correctamente",
+                        "",
+                        link_publicacion.strip(),
+                        accion="CAMBIO ADMINISTRADOR",
+                    )
+                    api_upsert_product(payload)
+                    st.success(f"{sku} marcado como {estado_publicado}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar publicado: {e}")
+
+            if b3.button("No publicable", key=f"admin_panel_nopub_{sku}_{idx}", use_container_width=True):
+                try:
+                    motivo_np = motivo_admin if nuevo_estado == "NO PUBLICABLE" else MOTIVOS_NO_PUBLICABLE[0]
+                    payload = payload_from_queue_row(
+                        row,
+                        "NO PUBLICABLE",
+                        APP_USER_ADMIN,
+                        motivo_np,
+                        "",
+                        link_publicacion.strip(),
+                        accion="CAMBIO ADMINISTRADOR",
+                    )
+                    api_upsert_product(payload)
+                    st.success(f"{sku} marcado como NO PUBLICABLE.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo marcar no publicable: {e}")
+
+            if b4.button("Pendiente revisar", key=f"admin_panel_pendiente_{sku}_{idx}", use_container_width=True):
+                try:
+                    payload = payload_from_queue_row(
+                        row,
+                        "PENDIENTE PUBLICAR",
+                        APP_USER_ADMIN,
+                        "Corrección de estado",
+                        "",
+                        link_publicacion.strip(),
+                        accion="CAMBIO ADMINISTRADOR",
+                    )
+                    api_upsert_product(payload)
+                    st.success(f"{sku} enviado a PENDIENTE PUBLICAR.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo cambiar a pendiente: {e}")
 
 
 def main():
