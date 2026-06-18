@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.15 - base inicial inventario"
+APP_VERSION = "V6.16 - motivo uso interno"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -92,6 +92,7 @@ MOTIVOS_NO_PUBLICABLE = [
     "Producto no identificado",
     "Producto restringido por Mercado Libre",
     "Marca/modelo fuera de norma",
+    "Artículo de uso interno",
     "Otro",
 ]
 
