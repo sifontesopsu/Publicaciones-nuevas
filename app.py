@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.21 - publicaciones por SKU"
+APP_VERSION = "V6.24 - variantes publicaciones por SKU"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -767,6 +767,8 @@ def load_publicaciones() -> pd.DataFrame:
     - La app NO decide por MLC / ITEM_ID.
     - La app decide por SKU.
     - Si un SKU aparece en el archivo de publicaciones ML, se considera publicado.
+    - Las variantes también cuentan: aunque TITLE venga vacío en la fila de variante,
+      si la variante tiene SKU, debe considerarse publicada.
     - ITEM_ID, PRODUCT_NUMBER y VARIATION_ID quedan solo como datos informativos.
     """
     if not safe_file_exists(PUBLICACIONES_FILE):
@@ -804,6 +806,12 @@ def load_publicaciones() -> pd.DataFrame:
         required=False,
     )
 
+    variations_col = find_column(
+        df,
+        ["VARIATIONS", "Variantes", "Variación", "Variacion"],
+        required=False,
+    )
+
     link_col = find_column(
         df,
         ["Link", "Permalink", "URL", "Enlace"],
@@ -821,23 +829,49 @@ def load_publicaciones() -> pd.DataFrame:
     # LLAVE REAL DE LA APP
     out["SKU"] = df[sku_col].map(clean_sku)
 
-    # Datos solo informativos
-    out["TituloML"] = df[title_col].fillna("").astype(str) if title_col else ""
-    out["ItemID"] = df[item_col].fillna("").astype(str) if item_col else ""
+    # Datos informativos
+    raw_title = df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(df))
+    raw_item = df[item_col].fillna("").astype(str) if item_col else pd.Series([""] * len(df))
+    raw_variation_name = df[variations_col].fillna("").astype(str) if variations_col else pd.Series([""] * len(df))
+
+    out["ItemID"] = raw_item
     out["ProductNumber"] = df[product_col].fillna("").astype(str) if product_col else ""
     out["VariationID"] = df[variation_col].fillna("").astype(str) if variation_col else ""
     out["EstadoML"] = df[estado_col].fillna("").astype(str) if estado_col else ""
     out["LinkML"] = df[link_col].fillna("").astype(str) if link_col else ""
+    out["VariacionML"] = raw_variation_name
+
+    # En el formato ML, las filas de variantes muchas veces vienen con TITLE vacío.
+    # El título está en la fila padre de la misma publicación ITEM_ID.
+    title_base = raw_title.fillna("").astype(str).str.strip()
+    item_base = raw_item.fillna("").astype(str).str.strip()
+
+    title_map = {}
+    for item_id, title in zip(item_base.tolist(), title_base.tolist()):
+        if item_id and title and title.lower() not in {"title", "titulo", "título"}:
+            title_map.setdefault(item_id, title)
+
+    titulo_final = []
+    for item_id, title, variation in zip(item_base.tolist(), title_base.tolist(), raw_variation_name.fillna("").astype(str).tolist()):
+        title_clean = str(title or "").strip()
+        variation_clean = str(variation or "").strip()
+
+        if not title_clean and item_id in title_map:
+            title_clean = title_map[item_id]
+
+        if title_clean and variation_clean and variation_clean != "-" and variation_clean.lower() != title_clean.lower():
+            titulo_final.append(f"{title_clean} - {variation_clean}")
+        else:
+            titulo_final.append(title_clean)
+
+    out["TituloML"] = titulo_final
 
     # Limpieza fuerte: solo SKUs reales.
+    # IMPORTANTE: no se elimina por título vacío, porque las variantes pueden traer TITLE vacío.
     invalid_skus = {"", "sku", "nan", "none", "22"}
     out = out[~out["SKU"].fillna("").astype(str).str.lower().str.strip().isin(invalid_skus)]
 
-    # Evitar filas de instrucciones/ayuda del archivo Mercado Libre.
-    if "TituloML" in out.columns:
-        out = out[~out["TituloML"].fillna("").astype(str).str.lower().str.strip().isin({"", "título", "titulo", "title"})]
-
-    # Dedupe por SKU porque la comparación debe ser SKU inventario vs SKU publicaciones.
+    # El criterio final es SKU. Si el SKU existe en este archivo, se considera publicado.
     out = out[out["SKU"] != ""].drop_duplicates(subset=["SKU"], keep="first")
 
     return out
@@ -884,10 +918,14 @@ def load_packs() -> pd.DataFrame:
 
 def load_inventory_from_upload(uploaded_file) -> pd.DataFrame:
     """
-    Lector robusto para LibroInventario.
-    Fuerza lectura con header=None y detecta la fila real de encabezados.
-    Esto evita que Streamlit/Pandas tome como encabezado:
-    'LIBRO MAYOR AUXILIAR DE INVENTARIO'.
+    Lector exclusivo para inventario consolidado Kame.
+
+    La app NO debe trabajar con reportes de movimientos porque no consolidan stock.
+    Archivo válido esperado:
+    Artículo | SKU | Familia | Q. Saldo Consolidado | $ Saldo | Costo promedio
+
+    También se acepta una columna equivalente de stock consolidado, pero NO:
+    Q. Entrada | Q. Salida | Q. Saldo
     """
     if hasattr(uploaded_file, "seek"):
         uploaded_file.seek(0)
@@ -899,18 +937,18 @@ def load_inventory_from_upload(uploaded_file) -> pd.DataFrame:
     raw = pd.read_excel(source, dtype=str, header=None)
 
     header_row_idx = None
-    rows_to_scan = min(100, len(raw))
+    rows_to_scan = min(80, len(raw))
 
     for i in range(rows_to_scan):
         row_values = ["" if pd.isna(v) else str(v) for v in raw.iloc[i].tolist()]
 
         has_sku = row_has_candidate(row_values, ["SKU"])
-        has_stock = row_has_candidate(
+        has_stock_consolidado = row_has_candidate(
             row_values,
             ["Q. Saldo Consolidado", "Saldo Consolidado", "Stock", "Cantidad", "Existencia"]
         )
 
-        if has_sku and has_stock:
+        if has_sku and has_stock_consolidado:
             header_row_idx = i
             break
 
@@ -920,19 +958,36 @@ def load_inventory_from_upload(uploaded_file) -> pd.DataFrame:
             preview.append([str(v) for v in raw.iloc[i].fillna("").tolist()])
 
         raise ValueError(
-            "V5.4: No pude detectar la fila real de encabezados del LibroInventario. "
-            "Busqué una fila que contenga SKU y Q. Saldo Consolidado/Stock. "
+            "No pude detectar un inventario consolidado válido. "
+            "El archivo debe tener SKU y Q. Saldo Consolidado/Stock consolidado. "
+            "No uses reportes de movimientos con Q. Entrada, Q. Salida y Q. Saldo. "
             f"Primeras filas detectadas: {preview}"
         )
 
     headers = make_unique_columns(raw.iloc[header_row_idx].fillna("").astype(str).tolist())
+    headers_norm = [norm_col(h) for h in headers]
+
+    es_reporte_movimientos = (
+        any(h in {"q entrada", "entrada"} for h in headers_norm)
+        and any(h in {"q salida", "salida"} for h in headers_norm)
+        and any(h == "q saldo" for h in headers_norm)
+        and not any(h == "q saldo consolidado" or "saldo consolidado" in h for h in headers_norm)
+    )
+
+    if es_reporte_movimientos:
+        raise ValueError(
+            "Este archivo parece ser un reporte de movimientos, no un inventario consolidado. "
+            "No sirve para esta app porque Q. Saldo puede repetirse muchas veces por SKU. "
+            "Debes subir el LibroInventario consolidado con una fila por SKU y stock consolidado."
+        )
+
     df = raw.iloc[header_row_idx + 1:].copy()
     df.columns = headers
     df = df.dropna(how="all").reset_index(drop=True)
 
-    # Guardar diagnóstico para mostrarlo en pantalla después de procesar.
     st.session_state["ultimo_inventario_header_excel"] = header_row_idx + 1
     st.session_state["ultimo_inventario_columnas"] = headers
+    st.session_state["ultimo_inventario_modelo"] = "Inventario consolidado: stock por SKU"
 
     sku_col = find_column(df, ["SKU"])
     stock_col = find_column(df, ["Q. Saldo Consolidado", "Saldo Consolidado", "Stock", "Cantidad", "Existencia"])
@@ -949,7 +1004,10 @@ def load_inventory_from_upload(uploaded_file) -> pd.DataFrame:
     out["CostoPromedio"] = df[costo_col].map(to_number) if costo_col else 0
     out["SaldoValor"] = df[saldo_valor_col].map(to_number) if saldo_valor_col else 0
 
-    out = out[out["SKU"] != ""]
+    out = out[out["SKU"] != ""].copy()
+
+    # En el inventario consolidado, si por cualquier razón un SKU aparece repetido,
+    # se suma el stock porque son filas de inventario, no movimientos.
     out = out.groupby("SKU", as_index=False).agg({
         "Articulo": "first",
         "Familia": "first",
@@ -961,6 +1019,7 @@ def load_inventory_from_upload(uploaded_file) -> pd.DataFrame:
     st.session_state["ultimo_inventario_filas"] = len(out)
 
     return out
+
 
 def normalize_inventory_from_api(inv_api_df: pd.DataFrame) -> pd.DataFrame:
     if inv_api_df.empty:
