@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Gestión de Publicaciones Pendientes - Aurora"
-APP_VERSION = "V6.17 - cambio masivo seleccionable"
+APP_VERSION = "V6.19 - orden stock operador"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -1397,7 +1397,7 @@ def operar_productos_ui(queue_df: pd.DataFrame):
     responsable = APP_USER_OPERACION
 
     with st.container(border=True):
-        c1, c2, c3 = st.columns([1.6, 1.4, 2.2])
+        c1, c2, c3, c4 = st.columns([1.5, 1.25, 1.75, 1.25])
         modo = c1.selectbox(
             "Cola",
             [
@@ -1414,6 +1414,11 @@ def operar_productos_ui(queue_df: pd.DataFrame):
         familias = ["TODAS"] + sorted(queue_df["Familia"].fillna("").astype(str).unique().tolist())
         familia = c2.selectbox("Familia", familias, key="operar_familia")
         search = c3.text_input("Buscar", key="operar_busqueda", placeholder="SKU o descripción")
+        orden_operador = c4.selectbox(
+            "Orden",
+            ["Prioridad", "Mayor stock", "Menor stock", "SKU", "Familia"],
+            key="operar_orden",
+        )
 
     df = queue_df.copy()
 
@@ -1441,6 +1446,15 @@ def operar_productos_ui(queue_df: pd.DataFrame):
         ]
 
     df = priority_sort(df)
+
+    if orden_operador == "Mayor stock":
+        df = df.sort_values("StockSistema", ascending=False)
+    elif orden_operador == "Menor stock":
+        df = df.sort_values("StockSistema", ascending=True)
+    elif orden_operador == "SKU":
+        df = df.sort_values("SKU", ascending=True)
+    elif orden_operador == "Familia":
+        df = df.sort_values(["Familia", "Descripcion"], ascending=True)
 
     left, right = st.columns([2, 1])
     left.markdown(f"**Productos en esta cola:** {len(df):,}")
@@ -2345,7 +2359,7 @@ def admin_informes_personalizados(queue_df: pd.DataFrame):
 
     orden = st.selectbox(
         "Ordenar por",
-        ["Más reciente", "Mayor stock Kame", "Familia", "SKU"],
+        ["Más reciente", "Mayor stock Kame", "Menor stock Kame", "Familia", "SKU"],
         key="admin_report_orden",
     )
 
@@ -2539,10 +2553,12 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
 
     c5, c6, c7 = st.columns([1.2, 1.2, 2.6])
     cantidad = c5.selectbox("Mostrar", [10, 20, 50, 100, 200], index=1, key="admin_panel_cantidad")
-    orden = c6.selectbox("Orden", ["Prioridad", "Mayor stock", "SKU", "Familia"], key="admin_panel_orden")
+    orden = c6.selectbox("Orden", ["Prioridad", "Mayor stock", "Menor stock", "SKU", "Familia"], key="admin_panel_orden")
 
     if orden == "Mayor stock":
         df = df.sort_values("StockSistema", ascending=False)
+    elif orden == "Menor stock":
+        df = df.sort_values("StockSistema", ascending=True)
     elif orden == "SKU":
         df = df.sort_values("SKU", ascending=True)
     elif orden == "Familia":
@@ -2562,22 +2578,86 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
     # Cambio masivo seleccionable dentro del mismo panel
     # ========================================================
     st.markdown("### Cambio masivo por selección")
-    st.caption("Marca solo los productos que quieres modificar. El cambio masivo se aplicará únicamente a los seleccionados.")
+    st.caption("Filtra por estado y familia, marca los productos y luego aplica el cambio solo a los seleccionados.")
 
     if "admin_bulk_selected_skus" not in st.session_state:
         st.session_state["admin_bulk_selected_skus"] = []
 
-    seleccion_limite = st.selectbox(
-        "Productos a mostrar en lista de selección",
+    bf1, bf2, bf3, bf4 = st.columns([1.7, 1.7, 2.2, 1.2])
+
+    estados_bulk = [
+        "TODOS",
+        "PENDIENTES POR PICKEAR/REVISAR",
+        "PICKEADOS PARA PUBLICAR",
+        "FALTANTE FÍSICO CON STOCK KAME",
+        "NO PUBLICABLE",
+        "PUBLICADO",
+        "SIN STOCK",
+        "CUBIERTO POR PACK/UNIDAD",
+    ]
+
+    estado_bulk_filter = bf1.selectbox(
+        "Estado para seleccionar",
+        estados_bulk,
+        key="admin_bulk_estado_filter",
+    )
+
+    familias_bulk = ["TODAS"] + sorted([
+        f for f in queue_df["Familia"].fillna("").astype(str).unique().tolist()
+        if f.strip()
+    ])
+
+    familia_bulk_filter = bf2.selectbox(
+        "Familia para seleccionar",
+        familias_bulk,
+        key="admin_bulk_familia_filter",
+    )
+
+    search_bulk = bf3.text_input(
+        "Buscar en cambio masivo",
+        key="admin_bulk_search",
+        placeholder="SKU o descripción",
+    )
+
+    seleccion_limite = bf4.selectbox(
+        "Mostrar",
         [25, 50, 100, 200],
         index=1,
         key="admin_bulk_selection_limit",
     )
 
-    df_bulk_visible = df.head(int(seleccion_limite)).copy()
+    df_bulk_base = queue_df.copy()
+
+    if estado_bulk_filter == "PENDIENTES POR PICKEAR/REVISAR":
+        df_bulk_base = df_bulk_base[df_bulk_base["Estado"].isin(["LLEGÓ STOCK", "PRODUCTO NUEVO CON STOCK", "PENDIENTE PUBLICAR"])]
+    elif estado_bulk_filter == "PICKEADOS PARA PUBLICAR":
+        df_bulk_base = df_bulk_base[df_bulk_base["Estado"].isin(["PICKEADO PARA PUBLICAR", "EN PROCESO DE PUBLICACIÓN"])]
+    elif estado_bulk_filter == "FALTANTE FÍSICO CON STOCK KAME":
+        df_bulk_base = df_bulk_base[df_bulk_base["Estado"] == "FALTANTE FÍSICO CON STOCK KAME"]
+    elif estado_bulk_filter == "NO PUBLICABLE":
+        df_bulk_base = df_bulk_base[df_bulk_base["Estado"] == "NO PUBLICABLE"]
+    elif estado_bulk_filter == "PUBLICADO":
+        df_bulk_base = df_bulk_base[df_bulk_base["Estado"].isin(["PUBLICADO", "PRODUCTO NUEVO PUBLICADO"])]
+    elif estado_bulk_filter == "SIN STOCK":
+        df_bulk_base = df_bulk_base[df_bulk_base["Estado"].isin(["SIN STOCK", "PRODUCTO NUEVO SIN STOCK"])]
+    elif estado_bulk_filter == "CUBIERTO POR PACK/UNIDAD":
+        df_bulk_base = df_bulk_base[df_bulk_base["Estado"].isin(["CUBIERTO POR PACK", "CUBIERTO POR UNIDAD"])]
+
+    if familia_bulk_filter != "TODAS":
+        df_bulk_base = df_bulk_base[df_bulk_base["Familia"] == familia_bulk_filter]
+
+    if search_bulk.strip():
+        s_bulk = search_bulk.strip().lower()
+        df_bulk_base = df_bulk_base[
+            df_bulk_base["SKU"].fillna("").astype(str).str.lower().str.contains(s_bulk, na=False) |
+            df_bulk_base["Descripcion"].fillna("").astype(str).str.lower().str.contains(s_bulk, na=False)
+        ]
+
+    df_bulk_base = priority_sort(df_bulk_base)
+    df_bulk_visible = df_bulk_base.head(int(seleccion_limite)).copy()
     visible_skus = df_bulk_visible["SKU"].astype(str).tolist()
 
-    sel_tools_1, sel_tools_2, sel_tools_3 = st.columns([1.2, 1.2, 2.6])
+    sel_tools_1, sel_tools_2, sel_tools_3, sel_tools_4 = st.columns([1.2, 1.2, 1.2, 2.6])
 
     if sel_tools_1.button("Marcar visibles", use_container_width=True, key="admin_bulk_marcar_visibles"):
         actuales = set(st.session_state.get("admin_bulk_selected_skus", []))
@@ -2585,49 +2665,62 @@ def administrador_ui(queue_df: pd.DataFrame, estado_df: pd.DataFrame, inv_curren
         st.session_state["admin_bulk_selected_skus"] = sorted(actuales)
         st.rerun()
 
-    if sel_tools_2.button("Limpiar selección", use_container_width=True, key="admin_bulk_limpiar"):
+    if sel_tools_2.button("Desmarcar visibles", use_container_width=True, key="admin_bulk_desmarcar_visibles"):
+        actuales = set(st.session_state.get("admin_bulk_selected_skus", []))
+        actuales.difference_update(visible_skus)
+        st.session_state["admin_bulk_selected_skus"] = sorted(actuales)
+        st.rerun()
+
+    if sel_tools_3.button("Limpiar selección", use_container_width=True, key="admin_bulk_limpiar"):
         st.session_state["admin_bulk_selected_skus"] = []
         st.rerun()
 
-    sel_tools_3.info(f"Seleccionados: {len(st.session_state.get('admin_bulk_selected_skus', [])):,}")
+    sel_tools_4.info(
+        f"Filtrados: {len(df_bulk_base):,} | Visibles: {len(df_bulk_visible):,} | "
+        f"Seleccionados: {len(st.session_state.get('admin_bulk_selected_skus', [])):,}"
+    )
 
     with st.container(border=True):
         st.write("**Lista para marcar**")
 
-        for idx_bulk, row_bulk in df_bulk_visible.iterrows():
-            sku_bulk = str(row_bulk.get("SKU", ""))
-            desc_bulk = str(row_bulk.get("Descripcion", ""))
-            estado_bulk = str(row_bulk.get("Estado", ""))
-            stock_bulk = row_bulk.get("StockSistema", 0)
-            motivo_bulk = str(row_bulk.get("Motivo", "") or "")
+        if df_bulk_visible.empty:
+            st.info("No hay productos con los filtros del cambio masivo.")
+        else:
+            for idx_bulk, row_bulk in df_bulk_visible.iterrows():
+                sku_bulk = str(row_bulk.get("SKU", ""))
+                desc_bulk = str(row_bulk.get("Descripcion", ""))
+                estado_bulk = str(row_bulk.get("Estado", ""))
+                stock_bulk = row_bulk.get("StockSistema", 0)
+                familia_bulk = str(row_bulk.get("Familia", "") or "")
+                motivo_bulk = str(row_bulk.get("Motivo", "") or "")
 
-            selected_now = sku_bulk in set(st.session_state.get("admin_bulk_selected_skus", []))
+                selected_now = sku_bulk in set(st.session_state.get("admin_bulk_selected_skus", []))
 
-            chk_col, info_col, state_col = st.columns([0.35, 4.7, 1.4])
+                chk_col, info_col, state_col = st.columns([0.35, 4.7, 1.4])
 
-            checked = chk_col.checkbox(
-                " ",
-                value=selected_now,
-                key=f"admin_bulk_chk_{sku_bulk}_{idx_bulk}",
-                label_visibility="collapsed",
-            )
+                checked = chk_col.checkbox(
+                    " ",
+                    value=selected_now,
+                    key=f"admin_bulk_chk_{sku_bulk}_{idx_bulk}",
+                    label_visibility="collapsed",
+                )
 
-            if checked and not selected_now:
-                seleccion = set(st.session_state.get("admin_bulk_selected_skus", []))
-                seleccion.add(sku_bulk)
-                st.session_state["admin_bulk_selected_skus"] = sorted(seleccion)
-            elif not checked and selected_now:
-                seleccion = set(st.session_state.get("admin_bulk_selected_skus", []))
-                seleccion.discard(sku_bulk)
-                st.session_state["admin_bulk_selected_skus"] = sorted(seleccion)
+                if checked and not selected_now:
+                    seleccion = set(st.session_state.get("admin_bulk_selected_skus", []))
+                    seleccion.add(sku_bulk)
+                    st.session_state["admin_bulk_selected_skus"] = sorted(seleccion)
+                elif not checked and selected_now:
+                    seleccion = set(st.session_state.get("admin_bulk_selected_skus", []))
+                    seleccion.discard(sku_bulk)
+                    st.session_state["admin_bulk_selected_skus"] = sorted(seleccion)
 
-            stock_text = f"{stock_bulk:g}" if isinstance(stock_bulk, (int, float)) else str(stock_bulk)
-            info_col.markdown(f"**{sku_bulk}** — {desc_bulk}")
-            info_col.caption(f"Stock Kame: {stock_text} | Motivo: {motivo_bulk if motivo_bulk else '-'}")
-            state_col.info(estado_bulk)
+                stock_text = f"{stock_bulk:g}" if isinstance(stock_bulk, (int, float)) else str(stock_bulk)
+                info_col.markdown(f"**{sku_bulk}** — {desc_bulk}")
+                info_col.caption(f"Familia: {familia_bulk} | Stock Kame: {stock_text} | Motivo: {motivo_bulk if motivo_bulk else '-'}")
+                state_col.info(estado_bulk)
 
     selected_skus = set(st.session_state.get("admin_bulk_selected_skus", []))
-    df_selected = df[df["SKU"].astype(str).isin(selected_skus)].copy()
+    df_selected = queue_df[queue_df["SKU"].astype(str).isin(selected_skus)].copy()
 
     st.write(f"Productos seleccionados para modificar: **{len(df_selected):,}**")
 
